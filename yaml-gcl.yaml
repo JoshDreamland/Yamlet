@@ -1,0 +1,6 @@
+t1: !import yaml-gcl2.yaml
+t2:
+  beans: 20
+  coolbeans: !fmt '{okay} {cool}'
+
+childtuple: !composite t1 t2
