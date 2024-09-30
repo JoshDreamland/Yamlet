@@ -1,6 +1,12 @@
 t1: !import yaml-gcl2.yaml
 t2:
-  beans: 20
-  coolbeans: !fmt '{okay} {cool}'
+  beans: beans
+  coolbeans: !expr |
+      'Hello, {subject}! ' + 'I say {cool} {beans}!'
 
-childtuple: !composite t1 t2
+childtuple: !expr t1.tuple t2
+childtuple2: !expr t2 t1.tuple2
+
+# Didn't I tell you not to do this?
+horribletuple: !expr t2 t1.tuple
+horribletuple2: !expr t1.tuple2 t2

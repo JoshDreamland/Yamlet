@@ -1,2 +1,9 @@
 tuple:
-  cool: 10
+  cool: cooool
+  beans: sauce
+  subject: world
+tuple2: !composite
+  - tuple
+  - {
+    cool: awesome
+  }
