@@ -86,6 +86,12 @@ chain onto the list overwrites the values in the previous tuples, and then
 expressions inherited from those tuples will use the new values.
 
 
+## Features
+The following are implemented:
+- GCL-Like tuple composition
+- Custom functions
+- Lambda expressions
+
 ## Strengths
 Because this is baked on top of YAML in Python, we have pretty good power and
 modularity. I didn't do any weird hacks to implement this; it's just YAML with
@@ -98,7 +104,12 @@ and will push any fixes here.
 
 A few I can think of:
 - No conditionals.
-- No helper functions right now (e.g. time functions, formatting functions).
 - Can't currently declare more tuples with {} in a raw expression.
-- No lambdas.
 - Passing junk to these constructors will vomit inscrutible errors.
+
+## What's in a name?
+Who knows! Maybe it plays on "JSonnet" by building a sort of Shakespearean motif
+around the name "Hamlet." Maybe it's a Portmanteau of "YAML" and "Borglet."
+Maybe it plays more directly on "applet" and how one might write them in YAML.
+Maybe it's simply the product of whatever sort of fever dream leads to the
+inception of a tool such as this.

@@ -7,13 +7,13 @@ import sys
 import token
 import tokenize
 
-from collections import deque
-
-class YamlGclOptions:
+class YamletOptions:
   Error = ['error']
-  def __init__(self, import_resolver=None, missing_name_value=Error):
+  def __init__(self, import_resolver=None, missing_name_value=Error,
+               functions={}):
     self.import_resolver = import_resolver or str
     self.missing_name_value = missing_name_value
+    self.functions = functions
 
 
 class GclDict(dict):
@@ -26,7 +26,8 @@ class GclDict(dict):
   def _resolvekv(self, k, v, ectx=None):
     if isinstance(v, DeferredValue):
       r = v._gcl_resolve_(ectx or
-          _EvalContext(self, self._gcl_opts_, self._yaml_point_))
+          _EvalContext(self, self._gcl_opts_, self._yaml_point_,
+                       name=f'Lookup of `{k}` in this scope'))
       self.__setitem__(k, r)
       return r
     else:
@@ -114,42 +115,61 @@ class YamlPoint:
     self.end = end
 
 
-def _PrettyError(mark):
-  return str(mark)
-  with open(filepath, 'r') as f: lines = f.readlines()
-  line_content = lines[mark.line]
-  caret_line = ' ' * mark.column + '^'
-  return f'{line_content}\n{caret_line}'
+
+class TraceItem(YamlPoint):
+  def __init__(self, yaml_point, name):
+    super().__init__(yaml_point.start, yaml_point.end)
+    self.name = name
+
+
+def _PrettyError(tace_item):
+  if tace_item.name: return f'{tace_item.name}\n{tace_item.start}'
+  return str(tace_item.start)
+
 
 class _EvalContext:
-  def __init__(self, scope, opts, yaml_point):
+  def __init__(self, scope, opts, yaml_point, name):
     self.scope = scope
     self.opts = opts
-    self.trace = [yaml_point]
+    if type(yaml_point) is list:
+      self.trace = yaml_point
+      assert name is None
+    else:
+      self.trace = [TraceItem(yaml_point, name)]
     self.evaluating = set()
 
-  def AddTrace(self, deferred_object):
-    self.trace.append(deferred_object._yaml_point_)
+  def AddObjectTrace(self, deferred_object, name):
+    self.trace.append(TraceItem(deferred_object._yaml_point_, name))
     if deferred_object in self.evaluating:
       self.Raise(RecursionError, 'Dependency cycle in tuple values.')
     self.evaluating.add(deferred_object)
 
-  def Error(self, msg):
-    return f'{self.trace[-1].start}\n{msg}'
+  def AddNamedTrace(self, yaml_point, name):
+    self.trace.append(TraceItem(yaml_point, name))
 
-  def NewGclDict(self):
-    return GclDict(
+  def FormatError(yaml_point, msg):
+    return f'{yaml_point.start}\n{msg}'
+
+  def Error(self, msg):
+    return _EvalContext.FormatError(self.trace[-1], msg)
+
+  def NewGclDict(self, *args, **kwargs):
+    return GclDict(*args, **kwargs,
         gcl_parent=self.scope, gcl_opts=self.opts, yaml_point=self.trace[-1])
 
+  def Duplicate(self):
+    return _EvalContext(self.scope, self.opts, list(self.trace), name=None)
+
   def AtScope(self, scope):
-    res = _EvalContext(scope, self.opts, list(self.trace))
+    res = self.Duplicate()
+    res.scope = scope
     return res
 
   def Raise(self, ex_class, message_sentence):
     raise ExceptionWithYamletTrace(ex_class,
-        'An error occurred while evaluating a Yamlet expression: '
-        + '\n\n'.join(_PrettyError(t.start) for t in self.trace)
-        + f'\n\n{message_sentence} See above trace for details.')
+        'An error occurred while evaluating a Yamlet expression:\n'
+        + '\n'.join(_PrettyError(t) for t in self.trace)
+        + f'\n{message_sentence} See above trace for details.')
 
 
 class DeferredValue:
@@ -165,7 +185,7 @@ class ModuleToLoad(DeferredValue):
   def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
   def _gcl_resolve_(self, ectx):
     if not self._gcl_cache_:
-      ectx.AddTrace(self)
+      ectx.AddObjectTrace(self, f'Resolving import `{self._gcl_construct_}`')
       fn = _ResolveStringValue(self._gcl_construct_, ectx)
       fn = pathlib.Path(ectx.opts.import_resolver(fn))
       _DebugPrint(f'Load the following module: {fn}')
@@ -185,7 +205,7 @@ class StringToSubstitute(DeferredValue):
   def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
   def _gcl_resolve_(self, ectx):
     if not self._gcl_cache_:
-      ectx.AddTrace(self)
+      ectx.AddObjectTrace(self, f'Evaluating string `{self._gcl_construct_}`')
       self._gcl_cache_ = _ResolveStringValue(self._gcl_construct_, ectx)
     return self._gcl_cache_
 
@@ -194,7 +214,8 @@ class TupleListToComposite(DeferredValue):
   def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
   def _gcl_resolve_(self, ectx):
     if not self._gcl_cache_:
-      ectx.AddTrace(self)
+      ectx.AddObjectTrace(
+          self, f'Compositing tuple list `{self._gcl_construct_}`')
       self._gcl_cache_ = _CompositeTuples(self._gcl_construct_, ectx)
     return self._gcl_cache_
 
@@ -203,9 +224,42 @@ class ExpressionToEvaluate(DeferredValue):
   def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
   def _gcl_resolve_(self, ectx):
     if not self._gcl_cache_:
-      ectx.AddTrace(self)
+      ectx.AddObjectTrace(
+          self, f'Evaluating expression `{self._gcl_construct_}`')
       self._gcl_cache_ = _GclExprEval(self._gcl_construct_, ectx)
     return self._gcl_cache_
+
+
+class GclLambda:
+  def __init__(self, expr, yaml_point):
+    self.yaml_point = yaml_point
+    sep = expr.find(':')
+    if sep < 0: raise ArgumentError(_EvalContext.FormatError(yaml_point,
+        f'Lambda does not delimit arguments from expression: `{expr}`'))
+    self.params = [x.strip() for x in expr[:sep].split(',')]
+    self.expression = expr[sep+1:]
+  def Callable(self, name, ectx):
+    ectx2 = ectx.Duplicate()
+    ectx2.AddNamedTrace(self.yaml_point, f'lambda `{name}`')
+    params = self.params
+    def LambdaEvaluator(*args, **kwargs):
+      mapped_args = list(args)
+      if len(mapped_args) > len(params):
+        ectx.Raise(TypeError, f'Too many arguments to lambda; '
+                              f'wanted {len(params)}, got {len(mapped_args)}.')
+      while len(mapped_args) < len(params):
+        p = params[len(mapped_args)]
+        if p in kwargs:
+          mapped_args.append(kwargs[p])
+          del kwargs[p]
+        else:
+          ectx.Raise(TypeError, f'Missing argument `{p}` to lambda `{name}`')
+      if kwargs: ectx.Raise(TypeError,
+          f'Extra keyword arguments `{kwargs.keys()}` to lambda `{name}`')
+      ectx2.scope = ectx2.NewGclDict({
+          params[i]: mapped_args[i] for i in range(len(params))})
+      return _GclExprEval(self.expression, ectx2)
+    return LambdaEvaluator
 
 
 def _DebugPrint(msg): pass #print(msg)
@@ -213,9 +267,8 @@ def _GclWarning(msg):
   print(msg, file=sys.stderr)
 
 
-def DynamicScopeLoader(opts=YamlGclOptions()):
+def DynamicScopeLoader(opts=YamletOptions()):
   loaded_modules = {}
-  modules_to_load = deque()
 
   def LoadCachedFile(fn):
     fn = fn.resolve()
@@ -253,11 +306,16 @@ def DynamicScopeLoader(opts=YamlGclOptions()):
     return ExpressionToEvaluate(
         node.value, YamlPoint(node.start_mark, node.end_mark))
 
+  def GclLambdaC(loader, node):
+    return GclLambda(
+        node.value, YamlPoint(node.start_mark, node.end_mark))
+
   y = YamletLoader(gcl_opts=opts)
   y.constructor.add_constructor("!import", GclImport)
   y.constructor.add_constructor("!composite", GclComposite)
   y.constructor.add_constructor("!fmt", GclStrFormat)
   y.constructor.add_constructor("!expr", GclExpression)
+  y.constructor.add_constructor("!lambda", GclLambdaC)
 
   def ProcessYamlGcl(ygcl):
     tup = y.load(ygcl)
@@ -363,7 +421,7 @@ def _GclNameLookup(name, ectx):
   if ectx.scope._gcl_parent_:
     return _GclNameLookup(name, ectx.AtScope(ectx.scope._gcl_parent_))
   mnv = ectx.opts.missing_name_value
-  if mnv is not YamlGclOptions.Error: return mnv
+  if mnv is not YamletOptions.Error: return mnv
   raise NameError(ectx.Error(f'There is no variable called `{name}`'))
 
 
@@ -385,7 +443,21 @@ def _EvalGclAst(et, ectx):
       match type(et.op):
         case ast.Add: return l + r
       raise NotImplementedError(f'Unsupported binary operation `{et.op}`')
-  raise NotImplementedError(f'Couldn\'t understand {type(et)} AST node')
+    case ast.Call:
+      fun, fun_name = None, None
+      if isinstance(et.func, ast.Name):
+        fun_name = et.func.id
+        if fun_name in ectx.opts.functions: fun = ectx.opts.functions[fun_name]
+      if not fun:
+        fun = _EvalGclAst(et.func, ectx)
+      if isinstance(fun, GclLambda): fun = fun.Callable(fun_name, ectx)
+      if not callable(fun): ectx.Raise(
+          TypeError, f'`{fun_name or ast.unparse(et.func)}` is not a function.')
+      fun_args = [_EvalGclAst(arg, ectx) for arg in et.args]
+      fun_kwargs = {kw.arg: _EvalContext(kw.value, ectx) for kw in et.keywords}
+      return fun(*fun_args, **fun_kwargs)
+  ectx.Raise(NotImplementedError,
+             f'Undefined Yamlet operation `{type(et)}`')
 
 
 def _CompositeGclTuples(tuples, ectx):

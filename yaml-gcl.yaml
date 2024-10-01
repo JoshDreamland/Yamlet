@@ -10,3 +10,12 @@ childtuple2: !expr t2 t1.tuple2
 # Didn't I tell you not to do this?
 horribletuple: !expr t2 t1.tuple
 horribletuple2: !expr t1.tuple2 t2
+
+other_features:
+  timestamp: !expr now()
+  double: !lambda 'x: x + x'
+  two: !expr double(1)
+
+recursive:
+  a: !expr b
+  b: !expr a
