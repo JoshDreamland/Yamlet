@@ -48,9 +48,23 @@ class GclDict(dict):
   def _gcl_merge_(self, other):
     if not isinstance(other, GclDict):
       raise TypeError('Expected GclDict to merge.')
-    other = other._gcl_clone_unresolved_()
     for k, v in other._gcl_noresolve_items_():
-      super().__setitem__(k, v)
+      if isinstance(v, GclDict):
+        v1 = super().setdefault(k, v)
+        if v1 is not v:
+          v1 = v1._gcl_shallow_clone_()
+          v1._gcl_merge_(v)
+          super().__setitem__(k, v1)
+      elif isinstance(v, DeferredValue):
+        super().__setitem__(k, v._gcl_clone_deferred_())
+      else:
+        super().__setitem__(k, v)
+
+  def _gcl_shallow_clone_(self):
+    return GclDict({
+        k: v for k, v in self._gcl_noresolve_items_()},
+        gcl_parent=self._gcl_parent_, gcl_opts=self._gcl_opts_,
+        yaml_point=self._yaml_point_)
 
   def _gcl_clone_unresolved_(self):
     if not self._gcl_has_unresolved_(): return self
@@ -179,6 +193,10 @@ class DeferredValue:
     self._yaml_point_ = yaml_point
   def _gcl_resolve_(self, ectx):
     raise NotImplementedError('Abstract method Resolve.')
+  def _gcl_clone_deferred_(self):
+    res = copy.copy(self)
+    res._gcl_cache_ = None
+    return res
 
 
 class ModuleToLoad(DeferredValue):
