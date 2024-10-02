@@ -28,7 +28,9 @@ class GclDict(dict):
       r = v._gcl_resolve_(ectx or
           _EvalContext(self, self._gcl_opts_, self._yaml_point_,
                        name=f'Lookup of `{k}` in this scope'))
-      self.__setitem__(k, r)
+      # XXX: This is a nice optimization, but breaks accessing templates before
+      # their derived types. We need to let the caching handle it for that case.
+      # self.__setitem__(k, r)
       return r
     else:
       return v
