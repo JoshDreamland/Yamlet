@@ -54,19 +54,25 @@ class GclDict(dict):
       if isinstance(v, GclDict):
         v1 = super().setdefault(k, v)
         if v1 is not v:
-          v1 = v1._gcl_shallow_clone_()
           v1._gcl_merge_(v)
-          super().__setitem__(k, v1)
+          v = v1
+        else:
+          v = v._gcl_clone_(self)
+          super().__setitem__(k, v)
+        assert v._gcl_parent_ is self
       elif isinstance(v, DeferredValue):
         super().__setitem__(k, v._gcl_clone_deferred_())
       else:
         super().__setitem__(k, v)
 
-  def _gcl_shallow_clone_(self):
-    return GclDict({
-        k: v for k, v in self._gcl_noresolve_items_()},
-        gcl_parent=self._gcl_parent_, gcl_opts=self._gcl_opts_,
-        yaml_point=self._yaml_point_)
+  def _gcl_clone_(self, new_parent):
+    '''Clones GclDicts recursively, updating parents.'''
+    res = GclDict(gcl_parent=new_parent, gcl_opts=self._gcl_opts_,
+                  yaml_point=self._yaml_point_)
+    for k, v in self._gcl_noresolve_items_():
+      if isinstance(v, GclDict): v = v._gcl_clone_(res)
+      res.__setitem__(k, v)
+    return res
 
   def _gcl_clone_unresolved_(self):
     if not self._gcl_has_unresolved_(): return self
@@ -385,12 +391,16 @@ def _ParseIntoChunks(expr):
 def _ResolveStringValue(val, ectx):
   res = ''
   j, d = 0, 0
+  dclose = False
   for i, c in enumerate(val):
     if c == '{':
       if d == 0:
         res += val[j:i]
         j = i + 1
       d += 1
+      if d == 2 and i == j:
+        d = 0
+        j = i
     elif c == '}':
       if d > 0:
         d -= 1
@@ -398,6 +408,15 @@ def _ResolveStringValue(val, ectx):
           exp = val[j:i]
           res += str(_GclExprEval(exp, ectx))
           j = i + 1
+        dclose = False
+      else:
+        if dclose:
+          dclose = False
+          res += val[j:i]
+          j = i + 1
+        else:
+          dclose = True
+
   res += val[j:]
   _DebugPrint(f'Formatted string: {res}')
   return res
@@ -429,8 +448,9 @@ def _CompositeTuples(tuples, ectx):
 def _GclExprEval(expr, ectx):
   _DebugPrint(f'Evaluate: {expr}')
   chunks = _ParseIntoChunks(expr)
-  if len(chunks) == 1: return _EvalGclAst(chunks[0], ectx)
-  return _CompositeGclTuples([_EvalGclAst(chunk, ectx) for chunk in chunks], ectx)
+  vals = [_EvalGclAst(chunk, ectx) for chunk in chunks]
+  if len(vals) == 1 and not isinstance(vals[0], GclDict): return vals[0]
+  return _CompositeGclTuples(vals, ectx)
 
 
 def _GclNameLookup(name, ectx):
@@ -442,7 +462,7 @@ def _GclNameLookup(name, ectx):
     return _GclNameLookup(name, ectx.AtScope(ectx.scope._gcl_parent_))
   mnv = ectx.opts.missing_name_value
   if mnv is not YamletOptions.Error: return mnv
-  raise NameError(ectx.Error(f'There is no variable called `{name}`'))
+  ectx.Raise(NameError, f'There is no variable called `{name}` in this scope')
 
 
 def _EvalGclAst(et, ectx):
