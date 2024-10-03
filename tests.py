@@ -1,3 +1,4 @@
+import traceback
 import unittest
 import yamlet
 
@@ -166,6 +167,48 @@ class TestStringMechanics(unittest.TestCase):
     loader = yamlet.DynamicScopeLoader()
     y = loader.loads(YAMLET)
     self.assertEqual(y['v3'], '{Hello}, {{world}}{s}!')
+
+
+class TestConditionals(unittest.TestCase):
+  def test_cond_routine(self):
+    YAMLET = '''# Yamlet
+    t1:
+      color: !expr cond(blocked, 'red', 'green')
+    t2: !composite
+      - t1
+      - { blocked: True }
+    t3: !composite
+      - t1
+      - { blocked: False }
+    '''
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+    self.assertEqual(y['t2']['color'], 'red')
+    self.assertEqual(y['t3']['color'], 'green')
+
+
+class TestRecursion(unittest.TestCase):
+  def test_recursion(self):
+    YAMLET = '''# Yamlet
+    recursive:
+      a: !expr b
+      b: !expr a
+    '''
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+    ex, val = None, None
+    try:
+      val = y['recursive']['a']
+    except RecursionError as exc:
+      tb = traceback.format_tb(exc.__traceback__)
+      ex = str(exc)
+    self.assertTrue(ex is not None, f'Did not throw an exception; got {val}')
+    fmt_tb = '  >' + '\n  >'.join('\n'.join(tb).splitlines())
+    self.assertLess(len(tb), 3, f'Stack trace is ugly:\n{fmt_tb}')
+    ex_lines = ex.splitlines()
+    self.assertGreater(len(ex_lines), 15, f'Yamlet trace is too small:\n{ex}')
+    self.assertLess(len(ex_lines), 30, f'Yamlet trace is too large:\n{ex}')
+
 
 if __name__ == '__main__':
   unittest.main()

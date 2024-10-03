@@ -103,13 +103,18 @@ Just wanted to get a draft out there. Gonna try to use this for my own purposes
 and will push any fixes here.
 
 A few I can think of:
-- No conditionals.
 - Can't currently declare more tuples with {} in a raw expression.
-- Passing junk to these constructors will vomit inscrutible errors.
+- No assertions.
+- Support for "external" and "null" in expressions
+  - "external" evaluates to external in any operation.
+  - "null" erases a key from a tuple, omitting it in compositing operations
+    unless it is added afterward.
+- More builtin functions (`substr`, `tail`, ...)
 
 ## What's in a name?
 Who knows! Maybe it plays on "JSonnet" by building a sort of Shakespearean motif
-around the name "Hamlet." Maybe it's a Portmanteau of "YAML" and "Borglet."
+around the name "Hamlet." Maybe it's a Portmanteau of "YAML" and "Borglet," or,
+perhaps more obviously, some amalgam of "YAML" and "template."
 Maybe it plays more directly on "applet" and how one might write them in YAML.
 Maybe it's simply the product of whatever sort of fever dream leads to the
 inception of a tool such as this.

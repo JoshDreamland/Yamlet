@@ -137,7 +137,6 @@ class YamlPoint:
     self.end = end
 
 
-
 class TraceItem(YamlPoint):
   def __init__(self, yaml_point, name):
     super().__init__(yaml_point.start, yaml_point.end)
@@ -293,6 +292,15 @@ def _GclWarning(msg):
   print(msg, file=sys.stderr)
 
 
+def _BuiltinFuncsMapper():
+  def cond(condition, if_true, if_false):
+    return if_true if condition else if_false
+  return {
+    'cond': cond,
+  }
+_BUILTIN_FUNCS = _BuiltinFuncsMapper()
+
+
 def DynamicScopeLoader(opts=YamletOptions()):
   loaded_modules = {}
 
@@ -384,7 +392,11 @@ def _ParseIntoChunks(expr):
     if not isinstance(untokenized, str):
       untokenized = untokenized.decode('utf-8')
     expstr = f'(\n{untokenized}\n)'
-    return ast.parse(expstr, mode='eval')
+    try:
+      return ast.parse(expstr, mode='eval')
+    except Exception as e:
+      raise SyntaxError(f'Failed to parse ast from `{expstr}` when processing these chunks: {token_blocks}') from e
+  _DebugPrint(f'Chunked as {token_blocks}')
   return [Parse(tokens) for tokens in token_blocks]
 
 
@@ -488,6 +500,7 @@ def _EvalGclAst(et, ectx):
       if isinstance(et.func, ast.Name):
         fun_name = et.func.id
         if fun_name in ectx.opts.functions: fun = ectx.opts.functions[fun_name]
+        elif fun_name in _BUILTIN_FUNCS: fun = _BUILTIN_FUNCS[fun_name]
       if not fun:
         fun = _EvalGclAst(et.func, ectx)
       if isinstance(fun, GclLambda): fun = fun.Callable(fun_name, ectx)
