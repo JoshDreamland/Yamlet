@@ -186,6 +186,31 @@ class TestConditionals(unittest.TestCase):
     self.assertEqual(y['t2']['color'], 'red')
     self.assertEqual(y['t3']['color'], 'green')
 
+  def test_cond_routine(self):
+    YAMLET = '''# Yamlet
+    t1:
+      conditionals: !expr |
+        cond(blocked, {
+          color: 'red'
+        }, {
+          color: 'green'
+        }) {
+          val: 'Color: {color}'
+        }
+    t2: !composite
+      - t1
+      - { blocked: True }
+    t3: !composite
+      - t1
+      - { blocked: False }
+    '''
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+    self.assertEqual(y['t2']['conditionals']['color'], 'red')
+    self.assertEqual(y['t2']['conditionals']['val'], 'Color: red')
+    self.assertEqual(y['t3']['conditionals']['val'], 'Color: green')
+    self.assertEqual(y['t3']['conditionals']['color'], 'green')
+
 
 class TestRecursion(unittest.TestCase):
   def test_recursion(self):

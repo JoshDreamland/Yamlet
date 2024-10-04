@@ -168,11 +168,9 @@ class _EvalContext:
   def AddNamedTrace(self, yaml_point, name):
     self.trace.append(TraceItem(yaml_point, name))
 
-  def FormatError(yaml_point, msg):
-    return f'{yaml_point.start}\n{msg}'
-
-  def Error(self, msg):
-    return _EvalContext.FormatError(self.trace[-1], msg)
+  def FormatError(yaml_point, msg): return f'{yaml_point.start}\n{msg}'
+  def GetPoint(self): return self.trace[-1]
+  def Error(self, msg): return _EvalContext.FormatError(self.GetPoint(), msg)
 
   def NewGclDict(self, *args, **kwargs):
     return GclDict(*args, **kwargs,
@@ -509,8 +507,21 @@ def _EvalGclAst(et, ectx):
       fun_args = [_EvalGclAst(arg, ectx) for arg in et.args]
       fun_kwargs = {kw.arg: _EvalContext(kw.value, ectx) for kw in et.keywords}
       return fun(*fun_args, **fun_kwargs)
+    case ast.Dict:
+      def EvalKey(k):
+        if isinstance(k, ast.Name): return k.id
+        if isinstance(k, ast.Constant):
+          if isinstance(et.value, str):
+            return _ResolveStringValue(et.value, ectx)
+        ectx.Raise(
+            KeyError,
+            'Yamlet keys should be names or strings. Got:\n{ast.dump(et)}')
+      def DeferAst(v):
+        return ExpressionToEvaluate(ast.unparse(v), ectx.GetPoint())
+      return ectx.NewGclDict({EvalKey(k): DeferAst(v)
+                              for k,v in zip(et.keys, et.values)})
   ectx.Raise(NotImplementedError,
-             f'Undefined Yamlet operation `{type(et)}`')
+             f'Undefined Yamlet operation `{type(et)}`:\n{ast.dump(et)}')
 
 
 def _CompositeGclTuples(tuples, ectx):
