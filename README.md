@@ -138,9 +138,8 @@ within a Yamlet mapping, however, *are* deferred.
 
 So the real weirdness here is that this isn't a Python dict literal, because
 name variables are not variables, and this isn't a YAML mapping literal, because
-every value is a raw Yamlet expression, *followed by a comma.* Unlike YAML, the
-commas are not optional, here. In fact, I'll bet the behavior is really weird
-right now if you forget one and I don't know what I'll do to fix that.
+every value is a raw Yamlet expression, *followed by a comma.* This is similar
+to a YAML mapping flow, but all keys must have values.
 
 ## Errata
 Mostly featureful, now, but some missing features I'll enumerate here and some

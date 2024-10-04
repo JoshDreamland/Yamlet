@@ -157,6 +157,24 @@ class TestTupleCompositing(unittest.TestCase):
     self.assertEqual(y['t2']['sub']['deferred'], 'Hello, world!')
 
 
+class TestInheritance(unittest.TestCase):
+  def test_up_and_super(self):
+    YAMLET = '''# Yamlet
+    t1:
+      a: one
+      sub:
+        a: two
+    t2: !composite
+      - t1
+      - a: three
+        sub:
+          a: four
+          counting: !fmt '{up.super.a} {super.a} {up.a} {a}'
+    '''
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+    self.assertEqual(y['t2']['sub']['counting'], 'one two three four')
+
 class TestStringMechanics(unittest.TestCase):
   def test_escaped_braces(self):
     YAMLET = '''# Yamlet

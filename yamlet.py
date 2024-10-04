@@ -17,9 +17,12 @@ class YamletOptions:
 
 
 class GclDict(dict):
-  def __init__(self, *args, gcl_parent, gcl_opts, yaml_point, **kwargs):
+  def __init__(self, *args,
+               gcl_parent, gcl_super, gcl_opts, yaml_point,
+               **kwargs):
     super().__init__(*args, **kwargs)
     self._gcl_parent_ = gcl_parent
+    self._gcl_super_ = gcl_super
     self._gcl_opts_ = gcl_opts
     self._yaml_point_ = yaml_point
 
@@ -65,10 +68,10 @@ class GclDict(dict):
       else:
         super().__setitem__(k, v)
 
-  def _gcl_clone_(self, new_parent):
+  def _gcl_clone_(self, new_parent, new_super=None):
     '''Clones GclDicts recursively, updating parents.'''
-    res = GclDict(gcl_parent=new_parent, gcl_opts=self._gcl_opts_,
-                  yaml_point=self._yaml_point_)
+    res = GclDict(gcl_parent=new_parent, gcl_super=new_super or self,
+                  gcl_opts=self._gcl_opts_, yaml_point=self._yaml_point_)
     for k, v in self._gcl_noresolve_items_():
       if isinstance(v, GclDict): v = v._gcl_clone_(res)
       res.__setitem__(k, v)
@@ -107,7 +110,8 @@ class YamletLoader(ruamel.yaml.YAML):
     self.representer.add_representer(GclDict, self.representer.represent_dict)
 
     def ConstructGclDict(loader, node):
-      return GclDict(loader.construct_pairs(node), gcl_parent=None,
+      return GclDict(loader.construct_pairs(node),
+                     gcl_parent=None, gcl_super=None,
                      gcl_opts=gcl_opts,
                      yaml_point=YamlPoint(
                         start=node.start_mark, end=node.end_mark))
@@ -172,9 +176,12 @@ class _EvalContext:
   def GetPoint(self): return self.trace[-1]
   def Error(self, msg): return _EvalContext.FormatError(self.GetPoint(), msg)
 
-  def NewGclDict(self, *args, **kwargs):
+  def NewGclDict(self, *args, gcl_parent=None, gcl_super=None, **kwargs):
     return GclDict(*args, **kwargs,
-        gcl_parent=self.scope, gcl_opts=self.opts, yaml_point=self.trace[-1])
+        gcl_parent=gcl_parent or self.scope,
+        gcl_super=gcl_super,
+        gcl_opts=self.opts,
+        yaml_point=self.trace[-1])
 
   def Duplicate(self):
     return _EvalContext(self.scope, self.opts, list(self.trace), name=None)
@@ -184,6 +191,8 @@ class _EvalContext:
     res.scope = scope
     return res
 
+  def Assert(self, expr, msg):
+    if not expr: self.Raise(AssertionError, msg)
   def Raise(self, ex_class, message_sentence):
     raise ExceptionWithYamletTrace(ex_class,
         'An error occurred while evaluating a Yamlet expression:\n'
@@ -239,7 +248,7 @@ class TupleListToComposite(DeferredValue):
     if not self._gcl_cache_:
       ectx.AddObjectTrace(
           self, f'Compositing tuple list `{self._gcl_construct_}`')
-      self._gcl_cache_ = _CompositeTuples(self._gcl_construct_, ectx)
+      self._gcl_cache_ = _CompositeYamlTupleList(self._gcl_construct_, ectx)
     return self._gcl_cache_
 
 
@@ -440,19 +449,17 @@ def _RecursiveUpdateParents(obj, parent, opts):
       _RecursiveUpdateParents(i, obj, opts)
 
 
-def _CompositeTuples(tuples, ectx):
-  assert isinstance(tuples, list), (
-      f'Expected list of tuples to composite; got {type(tuples)}')
-  assert tuples, 'Attempting to composite empty list of tuples'
+def _CompositeYamlTupleList(tuples, ectx):
+  ectx.Assert(isinstance(tuples, list),
+              f'Expected list of tuples to composite; got {type(tuples)}')
+  ectx.Assert(tuples, 'Attempting to composite empty list of tuples')
   _DebugPrint(f'Composite the following tuples: {tuples}')
-  res = ectx.NewGclDict()
-  for t in tuples:
-    if isinstance(t, DeferredValue): res._gcl_merge_(t._gcl_resolve_(res))
-    elif isinstance(t, str): res._gcl_merge_(_GclExprEval(t, ectx.AtScope(res)))
-    elif isinstance(t, GclDict): res._gcl_merge_(t)
-    else: raise TypeError(
+  for i, t in enumerate(tuples):
+    if isinstance(t, DeferredValue): tuples[i] = t._gcl_resolve_(ectx)
+    elif isinstance(t, str): tuples[i] = _GclExprEval(t, ectx)
+    elif not isinstance(t, GclDict): raise TypeError(
         f'{yaml_point}\nUnknown composite mechanism for {type(t)}')
-  return res
+  return _CompositeGclTuples(tuples, ectx)
 
 
 def _GclExprEval(expr, ectx):
@@ -462,8 +469,15 @@ def _GclExprEval(expr, ectx):
   if len(vals) == 1 and not isinstance(vals[0], GclDict): return vals[0]
   return _CompositeGclTuples(vals, ectx)
 
-
+_BUILTIN_NAMES = {
+  'up': lambda ectx: ectx.scope._gcl_parent_ or ectx.Raise(ValueError,
+                     f'No enclosing tuple (value to `up`) in this context.'),
+  'super': lambda ectx: ectx.scope._gcl_super_ or ectx.Raise(ValueError,
+                     f'No parent tuple (value to `super`) in this context.'),
+}
 def _GclNameLookup(name, ectx):
+  if name in _BUILTIN_NAMES:
+    return _BUILTIN_NAMES[name](ectx)
   if name in ectx.scope:
     get = ectx.scope._gcl_traceable_get_(name, ectx)
     if get is None: _GclWarning(ectx.Error(f'Warning: {name} is None'))
@@ -472,7 +486,7 @@ def _GclNameLookup(name, ectx):
     return _GclNameLookup(name, ectx.AtScope(ectx.scope._gcl_parent_))
   mnv = ectx.opts.missing_name_value
   if mnv is not YamletOptions.Error: return mnv
-  ectx.Raise(NameError, f'There is no variable called `{name}` in this scope')
+  ectx.Raise(NameError, f'There is no variable called `{name}` in this scope.')
 
 
 def _EvalGclAst(et, ectx):
@@ -487,12 +501,15 @@ def _EvalGclAst(et, ectx):
       return et.value
     case ast.Attribute:
       val = ev(et.value)
+      if et.attr in _BUILTIN_NAMES:
+        ectx = ectx.AtScope(val)
+        return _BUILTIN_NAMES[et.attr](ectx)
       return val[et.attr]
     case ast.BinOp:
       l, r = ev(et.left), ev(et.right)
       match type(et.op):
         case ast.Add: return l + r
-      raise NotImplementedError(f'Unsupported binary operation `{et.op}`')
+      ectx.Raise(NotImplementedError, f'Unsupported binary operator `{et.op}`.')
     case ast.Call:
       fun, fun_name = None, None
       if isinstance(et.func, ast.Name):
@@ -525,8 +542,10 @@ def _EvalGclAst(et, ectx):
 
 
 def _CompositeGclTuples(tuples, ectx):
-  res = ectx.NewGclDict()
+  res = None
   for t in tuples:
-    if t is None: raise ValueError('Expression evaluation failed?')
+    if t is None: ectx.Raise(ValueError, 'Expression evaluation failed?')
+    if res: res = res._gcl_clone_(ectx.scope)
+    else: res = ectx.NewGclDict()
     res._gcl_merge_(t)
   return res
