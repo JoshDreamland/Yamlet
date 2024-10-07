@@ -2,9 +2,13 @@
 
 Yamlet is a tool for writing complex configurations in YAML.
 
-YAML itself doesn't support operations such as string concatenation,
-so a common wishlist item for people is the ability to use a YAML anchor
-to extend one tuple value inside another.
+It is reminiscent of GCL, but has strict YAML syntax, while offering complex
+expression evaluation and templating operations that would have otherwised
+required an engine such as Jinja.
+
+YAML itself doesn't support even simple operations such as string concatenation,
+so a common wishlist item for people is the ability to use a YAML anchor to
+extend one tuple value inside another.
 
 E.g.
 ```yaml
@@ -88,9 +92,16 @@ expressions inherited from those tuples will use the new values.
 
 ## Features
 The following are implemented:
+- String formatting (as above)
 - GCL-Like tuple composition
-- Custom functions
+- File import (to allow splitting up configs or splitting out templates)
 - Lambda expressions
+- Custom functions (defined in Python)
+- Explicit composition using `up`/`super`
+  - `up` refers to the scope that contains the current scope, as in nested
+     tuples.
+  - `super` refers to the scope from which the current scope was composed,
+     as in the template from which some of its values were inherited.
 
 ## Strengths
 Because this is baked on top of YAML in Python, we have pretty good power and
@@ -98,8 +109,8 @@ modularity. I didn't do any weird hacks to implement this; it's just YAML with
 a few custom constructors to handle deferred expression evaluation.
 
 ## Caveats
-### YAML as the carrier
-Yamlet is build on top of YAML. That means that the first tool to parse your
+### Yamlet is an extension of YAML
+Yamlet is built on top of YAML. That means that the first tool to parse your
 configuration file ***is** a YAML interpreter*, namely Ruamel. The facilities
 offered by this tool will only work for you if you can convey your expression
 strings through Ruamel. As stated above, this tool has a separate tag for `!fmt`
@@ -117,8 +128,8 @@ my_string: !expr |
 This is, at the time of this writing, the only way to trigger literal style for
 a YAML value. I cannot accomplish it from a tag.
 
-### Maps in Yamlet
-Yamlet maps are meant to look like YAML maps, but they aren't:
+### Map literals in Yamlet expressions
+Yamlet maps are meant to look like YAML maps, but they aren't exactly the same:
 
 ```yaml
 my_yamlet_map: !expr |
@@ -128,31 +139,61 @@ my_yamlet_map: !expr |
   }
 ```
 
-This is because the Python parser is used to handle expressions in Yamlet.
-I have taken the liberty of allowing raw names as the key without unpacking
-these as expressions, per Python. To use a variable as the key, you can say
-`'{key_variable}': value_variable`, but note that the `key_variable` must be
-available in the compositing scope (the scope containing the mapping expression)
-and CANNOT be deferred to access values from the resulting tuple. The values
-within a Yamlet mapping, however, *are* deferred.
+This is because the Python parser is used to handle expressions in Yamlet,
+including interpreting mapping flows (which are based instead on Python dicts).
+I have taken the liberty of allowing raw names as the key (per YAML) without
+unpacking these as expressions (per Python). To use a variable as the key, you
+can say `'{key_variable}': value_variable`, but note that the `key_variable`
+must be available in the compositing scope (the scope containing the mapping
+expression) and CANNOT be deferred to access values from the resulting tuple.
+The values within a Yamlet mapping, however, *are* deferred.
 
 So the real weirdness here is that this isn't a Python dict literal, because
 name variables are not variables, and this isn't a YAML mapping literal, because
-every value is a raw Yamlet expression, *followed by a comma.* This is similar
-to a YAML mapping flow, but all keys must have values.
+every value is a raw Yamlet expression, wherein strings must be quoted.
+An additional difference from YAML mapping flows is that all keys must have
+values; you may not simply mix dict pairs and set keys (YAML allows this,
+Python and Yamlet do not).
 
-## Errata
-Mostly featureful, now, but some missing features I'll enumerate here and some
-janky or interesting behavior above in "Caveats."
-
-A few missing features I can think of:
+## Differences from GCL
+### Missing features
+A few currently missing features I can think of:
 - No assertions.
-- Support for "external" and "null" in expressions
-  - "external" evaluates to external in any operation.
-  - "null" erases a key from a tuple, omitting it in compositing operations
-    unless it is added afterward.
-- More builtin functions (`substr`, `tail`, ...)
-- Support for the `args` tuple
+- Support for `external` and `null` in expressions.
+  - `external` evaluates to `external` when used in any operation. Requesting
+     an external value from a tuple explicitly results in an error. This is the
+     default for any undeclared value, so I haven't seen the need.
+  - `null` erases a key from a tuple, omitting it in compositing operations
+     unless it is added afterward in a further tuple.
+- More builtin functions (`substr`, `tail`, ...).
+- Support for the `args` tuple.
+- Support for `final` and `local` expressions. The language might be better
+  without these...
+
+### Improvements over GCL
+Yamlet tracks all origin information, so there's no need for a separate utility
+to tell you where an expression came from. Consequently, you may chain `super`
+expressions within Yamlet and it will "just work." You can also invoke
+`explain_value` in any resulting dictionary to retrieve a description of how the
+value was determined. This feature could use more testing and debugging for
+beautification purposes.
+
+## Differences from the rest of industry
+Yamlet is probably the only templating or expression evaluation engine that
+doesn't use jq. If you want to use jq, you can create a function that accepts
+a jq string and use Yamlet's literal formatting to put values in the string.
+
+Yamlet shares a more procedural syntax with GCL. It's currently missing
+arithmetic operations because I didn't see anyone needing them, but they're
+a seven-line patch.
+
+A Yamlet configuration file (or "program," as GCL calls its own scripts) doesn't
+really need jq, because you can just invoke routines in it functionally.
+
+It's also worth pointing out that Jinja does not pair well with YAML because
+Jinja lends itself to cutting and pasting lines of file, and YAML uses indent
+as a form of syntax. Import statements in Yamlet import the final tuple value,
+not a chunk of unprocessed file.
 
 ## What's in a name?
 Who knows! Maybe it plays on "JSonnet" by building a sort of Shakespearean motif

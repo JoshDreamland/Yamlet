@@ -25,16 +25,26 @@ class GclDict(dict):
     self._gcl_super_ = gcl_super
     self._gcl_opts_ = gcl_opts
     self._yaml_point_ = yaml_point
+    self._gcl_provenance_ = {}
 
   def _resolvekv(self, k, v, ectx=None):
+    bt_msg = f'Lookup of `{k}` in this scope'
+    if ectx: ectx = ectx.BranchForNameResolution(bt_msg, k, self)
     if isinstance(v, DeferredValue):
-      r = v._gcl_resolve_(ectx or
-          _EvalContext(self, self._gcl_opts_, self._yaml_point_,
-                       name=f'Lookup of `{k}` in this scope'))
-      # XXX: This is a nice optimization, but breaks accessing templates before
-      # their derived types. We need to let the caching handle it for that case.
-      # self.__setitem__(k, r)
-      return r
+      uncaught_recursion = None
+      try:
+        r = v._gcl_resolve_(ectx or
+            _EvalContext(self, self._gcl_opts_, self._yaml_point_, name=bt_msg))
+        # XXX: This is a nice optimization but breaks accessing templates before
+        # their derived types. We need to let the caching done in DeferredValue 
+        # handle it for that case.
+        # self.__setitem__(k, r)
+        return r
+      except RecursionError as r: uncaught_recursion = r
+      if uncaught_recursion:
+        ectx.Raise(RecursionError,
+                   f'Uncaught recursion error in access.', uncaught_recursion)
+      raise exception_during_access
     else:
       return v
 
@@ -50,14 +60,27 @@ class GclDict(dict):
   def values(self):
     return (v for _, v in self.items())
 
-  def _gcl_merge_(self, other):
+  def explain_value(self, k):
+    if k not in super().keys(): return f'`{k}` is not defined in this object.'
+    obj = super().__getitem__(k)
+    if isinstance(obj, DeferredValue):
+      return obj._gcl_provenance_.ExplainUp(_prep = f'`{k}` was computed from')
+    inherited = self._gcl_provenance_.get(k)
+    if inherited:
+      return f'`{k}` was inherited from another tuple {_TuplePointStr(inherited)}'
+    return f'`{k}` was declared directly in this tuple {_TuplePointStr(self)}'
+
+  def _gcl_merge_(self, other, ectx):
     if not isinstance(other, GclDict):
       raise TypeError('Expected GclDict to merge.')
     for k, v in other._gcl_noresolve_items_():
       if isinstance(v, GclDict):
         v1 = super().setdefault(k, v)
         if v1 is not v:
-          v1._gcl_merge_(v)
+          if not isinstance(v1, GclDict):
+            ectx.Raise(TypeError, f'Cannot composite `{type(v1)}` object `{k}` '
+                                   'with dictionary value in extending tuple.')
+          v1._gcl_merge_(v, ectx)
           v = v1
         else:
           v = v._gcl_clone_(self)
@@ -66,6 +89,7 @@ class GclDict(dict):
       elif isinstance(v, DeferredValue):
         super().__setitem__(k, v._gcl_clone_deferred_())
       else:
+        self._gcl_provenance_[k] = other._gcl_provenance_.get(k, other)
         super().__setitem__(k, v)
 
   def _gcl_clone_(self, new_parent, new_super=None):
@@ -98,6 +122,7 @@ class GclDict(dict):
 
   def _gcl_noresolve_values_(self): return super().values()
   def _gcl_noresolve_items_(self): return super().items()
+  def _gcl_noresolve_get_(self, k): return super().__getitem__(k)
   def _gcl_traceable_get_(self, key, ectx):
     return self._resolvekv(key, super().__getitem__(key), ectx)
 
@@ -141,39 +166,33 @@ class YamlPoint:
     self.end = end
 
 
-class TraceItem(YamlPoint):
-  def __init__(self, yaml_point, name):
-    super().__init__(yaml_point.start, yaml_point.end)
-    self.name = name
-
-
-def _PrettyError(tace_item):
-  if tace_item.name: return f'{tace_item.name}\n{tace_item.start}'
-  return str(tace_item.start)
-
-
 class _EvalContext:
-  def __init__(self, scope, opts, yaml_point, name):
+  def __init__(self, scope, opts, yaml_point, name, parent=None, deferred=None):
     self.scope = scope
     self.opts = opts
-    if type(yaml_point) is list:
-      self.trace = yaml_point
-      assert name is None
-    else:
-      self.trace = [TraceItem(yaml_point, name)]
-    self.evaluating = set()
+    self._trace_point = _EvalContext._TracePoint(yaml_point, name)
+    self._evaluating = id(deferred)
+    self._parent = parent
+    self._children = None
+    self._name_deps = None
 
-  def AddObjectTrace(self, deferred_object, name):
-    self.trace.append(TraceItem(deferred_object._yaml_point_, name))
-    if deferred_object in self.evaluating:
-      self.Raise(RecursionError, 'Dependency cycle in tuple values.')
-    self.evaluating.add(deferred_object)
+  def _PrettyError(tace_item):
+    if tace_item.name: return f'{tace_item.name}\n{tace_item.start}'
+    return str(tace_item.start)
 
-  def AddNamedTrace(self, yaml_point, name):
-    self.trace.append(TraceItem(yaml_point, name))
+  class _ScopeVisit:
+    def __init__(self, ectx, scope):
+      self.ectx, self.scope, self.oscope = ectx, scope, ectx.scope
+    def __enter__(self): self.ectx.scope = self.scope
+    def __exit__(self, exc_type, exc_val, exc_tb): self.ectx.scope = self.oscope
+
+  class _TracePoint(YamlPoint):
+    def __init__(self, yaml_point, name):
+      super().__init__(yaml_point.start, yaml_point.end)
+      self.name = name
 
   def FormatError(yaml_point, msg): return f'{yaml_point.start}\n{msg}'
-  def GetPoint(self): return self.trace[-1]
+  def GetPoint(self): return self._trace_point
   def Error(self, msg): return _EvalContext.FormatError(self.GetPoint(), msg)
 
   def NewGclDict(self, *args, gcl_parent=None, gcl_super=None, **kwargs):
@@ -181,23 +200,84 @@ class _EvalContext:
         gcl_parent=gcl_parent or self.scope,
         gcl_super=gcl_super,
         gcl_opts=self.opts,
-        yaml_point=self.trace[-1])
+        yaml_point=self._trace_point)
 
-  def Duplicate(self):
-    return _EvalContext(self.scope, self.opts, list(self.trace), name=None)
+  def Branch(self, name, yaml_point, scope):
+    return self._TrackChild(
+        _EvalContext(scope, self.opts, yaml_point, name, parent=self))
 
-  def AtScope(self, scope):
-    res = self.Duplicate()
-    res.scope = scope
-    return res
+  def BranchForNameResolution(self, lookup_description, lookup_key, scope):
+    return self._TrackNameDep(lookup_key,
+        _EvalContext(scope, self.opts, scope._yaml_point_, lookup_description,
+                     parent=self))
+
+  def BranchForDeferredEval(self, deferred_object, description):
+    tp = _EvalContext._TracePoint(deferred_object._yaml_point_, description)
+    if id(deferred_object) in self._EnumEvaluating():
+      self.Raise(RecursionError, 'Dependency cycle in tuple values.')
+    return self._TrackChild(
+        _EvalContext(self.scope, self.opts, deferred_object._yaml_point_,
+                     description, parent=self, deferred=deferred_object))
+
+  def _TrackChild(self, child):
+    if self._children: self._children.append(child)
+    else: self._children = [child]
+    return child
+
+  def _TrackNameDep(self, name, child):
+    if self._name_deps:
+      # XXX: It would be nice to assert that `name` isn't already in the dict,
+      # however, basic lambda expressions such as the test `lambda x: x + x`
+      # refer to the same variable twice in one scope, and I don't think it's
+      # helpful for our traceback to explain that it is adding two numbers...
+      self._name_deps[name] = child
+    else: self._name_deps = {name: child}
+    return child
+
+  def ExplainUp(self, indent=4, start_indent=0, _prep=None):
+    ind = ' ' * start_indent
+    if not _prep: _prep = 'From'
+    me = self._trace_point.name
+    me = me[0].lower() + me[1:]
+    me = f'{_prep} {me} {str(self._trace_point.start).strip()}'
+    me = ind + f'{ind}\n'.join(me.splitlines())
+    ccount = ((len(self._children) if self._children else 0) + 
+              (len(self._name_deps) if self._name_deps else 0))
+    if ccount > 1:
+      nindent = start_indent + indent
+      if ccount: me += '\n'
+    else: nindent = start_indent
+    return me + '\n'.join(
+        [f'{ind} - {child.ExplainUp(indent, nindent).lstrip()}'
+         for child in (self._children or [])]) + '\n'.join(
+        [f'{ind} - {child.ExplainUp(indent, nindent, _prep="With").lstrip()}'
+         for child in (self._name_deps or {}).values()])
+
+  def Scope(self, scope):
+    return _EvalContext._ScopeVisit(self, scope)
 
   def Assert(self, expr, msg):
     if not expr: self.Raise(AssertionError, msg)
-  def Raise(self, ex_class, message_sentence):
+  def Raise(self, ex_class, message_sentence, e=None):
+    if message_sentence == message_sentence.rstrip(): message_sentence += ' '
     raise ExceptionWithYamletTrace(ex_class,
         'An error occurred while evaluating a Yamlet expression:\n'
-        + '\n'.join(_PrettyError(t) for t in self.trace)
-        + f'\n{message_sentence} See above trace for details.')
+        + '\n'.join(_EvalContext._PrettyError(t) for t in self.FullTrace())
+        + f'\n{message_sentence}See above trace for details.') from e
+
+  def _EnumEvaluating(self):
+    p = self
+    while p:
+      if p._evaluating: yield p._evaluating
+      p = p._parent
+
+  def FullTrace(self):
+    p = self
+    trace = []
+    while p:
+      trace.append(p._trace_point)
+      p = p._parent
+    return trace[::-1]
 
 
 class DeferredValue:
@@ -217,16 +297,18 @@ class ModuleToLoad(DeferredValue):
   def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
   def _gcl_resolve_(self, ectx):
     if not self._gcl_cache_:
-      ectx.AddObjectTrace(self, f'Resolving import `{self._gcl_construct_}`')
-      fn = _ResolveStringValue(self._gcl_construct_, ectx)
+      self._gcl_provenance_ = ectx.BranchForDeferredEval(
+          self, f'Resolving import `{self._gcl_construct_}`')
+      fn = _ResolveStringValue(self._gcl_construct_, self._gcl_provenance_)
       fn = pathlib.Path(ectx.opts.import_resolver(fn))
       _DebugPrint(f'Load the following module: {fn}')
       if not fn.exists():
         if self._gcl_construct_ == fn:
-          raise FileNotFoundError(f'Could not import YamlBcl file: {self.data}')
-        raise FileNotFoundError(
-            f'Could not import YamlBcl file: `{fn}`\n'
-            f'As evaluated from this expression: `{self.data}`')
+          ectx.Raise(FileNotFoundError,
+                     f'Could not import YamlBcl file: {self.data}')
+        ectx.Raise(FileNotFoundError,
+                   f'Could not import YamlBcl file: `{fn}`\n'
+                   f'As evaluated from this expression: `{self.data}`.\n')
       loaded = self._gcl_loader_(fn)
       _DebugPrint(f'Loaded:\n{loaded}')
       self._gcl_cache_ = loaded
@@ -237,8 +319,10 @@ class StringToSubstitute(DeferredValue):
   def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
   def _gcl_resolve_(self, ectx):
     if not self._gcl_cache_:
-      ectx.AddObjectTrace(self, f'Evaluating string `{self._gcl_construct_}`')
-      self._gcl_cache_ = _ResolveStringValue(self._gcl_construct_, ectx)
+      self._gcl_provenance_ = ectx.BranchForDeferredEval(
+          self, f'Evaluating string `{self._gcl_construct_}`')
+      self._gcl_cache_ = _ResolveStringValue(
+          self._gcl_construct_, self._gcl_provenance_)
     return self._gcl_cache_
 
 
@@ -246,9 +330,10 @@ class TupleListToComposite(DeferredValue):
   def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
   def _gcl_resolve_(self, ectx):
     if not self._gcl_cache_:
-      ectx.AddObjectTrace(
+      self._gcl_provenance_ = ectx.BranchForDeferredEval(
           self, f'Compositing tuple list `{self._gcl_construct_}`')
-      self._gcl_cache_ = _CompositeYamlTupleList(self._gcl_construct_, ectx)
+      self._gcl_cache_ = _CompositeYamlTupleList(
+          self._gcl_construct_, self._gcl_provenance_)
     return self._gcl_cache_
 
 
@@ -256,9 +341,10 @@ class ExpressionToEvaluate(DeferredValue):
   def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
   def _gcl_resolve_(self, ectx):
     if not self._gcl_cache_:
-      ectx.AddObjectTrace(
-          self, f'Evaluating expression `{self._gcl_construct_}`')
-      self._gcl_cache_ = _GclExprEval(self._gcl_construct_, ectx)
+      self._gcl_provenance_ = ectx.BranchForDeferredEval(
+          self, f'Evaluating expression `{self._gcl_construct_.strip()}`')
+      self._gcl_cache_ = _GclExprEval(
+          self._gcl_construct_, self._gcl_provenance_)
     return self._gcl_cache_
 
 
@@ -271,8 +357,6 @@ class GclLambda:
     self.params = [x.strip() for x in expr[:sep].split(',')]
     self.expression = expr[sep+1:]
   def Callable(self, name, ectx):
-    ectx2 = ectx.Duplicate()
-    ectx2.AddNamedTrace(self.yaml_point, f'lambda `{name}`')
     params = self.params
     def LambdaEvaluator(*args, **kwargs):
       mapped_args = list(args)
@@ -288,9 +372,11 @@ class GclLambda:
           ectx.Raise(TypeError, f'Missing argument `{p}` to lambda `{name}`')
       if kwargs: ectx.Raise(TypeError,
           f'Extra keyword arguments `{kwargs.keys()}` to lambda `{name}`')
-      ectx2.scope = ectx2.NewGclDict({
-          params[i]: mapped_args[i] for i in range(len(params))})
-      return _GclExprEval(self.expression, ectx2)
+      return _GclExprEval(self.expression, ectx.Branch(
+          f'lambda `{name}`', self.yaml_point, ectx.NewGclDict(
+              {params[i]: mapped_args[i] for i in range(len(params))}
+          )
+      ))
     return LambdaEvaluator
 
 
@@ -321,7 +407,7 @@ def DynamicScopeLoader(opts=YamletOptions()):
                              'are deferred until name lookup.')
       return res
     loaded_modules[fn] = None
-    with open(fn) as file: res = ProcessYamlGcl(file.read())
+    with open(fn) as file: res = ProcessYamlGcl(file)
     loaded_modules[fn] = res
     return res
 
@@ -380,6 +466,10 @@ def _TokensCollide(t1, t2):
   if t2.type == token.OP and t2.string not in '([{': return False
   if t1.type == token.OP and t1.string not in ')]}': return False
   return True
+
+
+def _TuplePointStr(tup):
+  return str(tup._yaml_point_.start).lstrip()
 
 
 def _ParseIntoChunks(expr):
@@ -483,7 +573,8 @@ def _GclNameLookup(name, ectx):
     if get is None: _GclWarning(ectx.Error(f'Warning: {name} is None'))
     return get
   if ectx.scope._gcl_parent_:
-    return _GclNameLookup(name, ectx.AtScope(ectx.scope._gcl_parent_))
+    with ectx.Scope(ectx.scope._gcl_parent_):
+      return _GclNameLookup(name, ectx)
   mnv = ectx.opts.missing_name_value
   if mnv is not YamletOptions.Error: return mnv
   ectx.Raise(NameError, f'There is no variable called `{name}` in this scope.')
@@ -502,8 +593,8 @@ def _EvalGclAst(et, ectx):
     case ast.Attribute:
       val = ev(et.value)
       if et.attr in _BUILTIN_NAMES:
-        ectx = ectx.AtScope(val)
-        return _BUILTIN_NAMES[et.attr](ectx)
+        with ectx.Scope(val): return _BUILTIN_NAMES[et.attr](ectx)
+      if isinstance(val, GclDict): return val._gcl_traceable_get_(et.attr, ectx)
       return val[et.attr]
     case ast.BinOp:
       l, r = ev(et.left), ev(et.right)
@@ -522,7 +613,7 @@ def _EvalGclAst(et, ectx):
       if not callable(fun): ectx.Raise(
           TypeError, f'`{fun_name or ast.unparse(et.func)}` is not a function.')
       fun_args = [_EvalGclAst(arg, ectx) for arg in et.args]
-      fun_kwargs = {kw.arg: _EvalContext(kw.value, ectx) for kw in et.keywords}
+      fun_kwargs = {kw.arg: _EvalGclAst(kw.value, ectx) for kw in et.keywords}
       return fun(*fun_args, **fun_kwargs)
     case ast.Dict:
       def EvalKey(k):
@@ -547,5 +638,5 @@ def _CompositeGclTuples(tuples, ectx):
     if t is None: ectx.Raise(ValueError, 'Expression evaluation failed?')
     if res: res = res._gcl_clone_(ectx.scope)
     else: res = ectx.NewGclDict()
-    res._gcl_merge_(t)
+    res._gcl_merge_(t, ectx)
   return res

@@ -16,3 +16,7 @@ print(t['other_features']['two'])
 
 # The following would break because of cycles.
 # print(t['recursive']['a'])
+
+print(t['childtuple'].explain_value('coolbeans'))
+print(t['childtuple'].explain_value('beans'))
+print(t['childtuple2'].explain_value('beans'))

@@ -243,14 +243,14 @@ class TestRecursion(unittest.TestCase):
     try:
       val = y['recursive']['a']
     except RecursionError as exc:
+      ex = ''.join(traceback.format_exception(exc))
       tb = traceback.format_tb(exc.__traceback__)
-      ex = str(exc)
     self.assertTrue(ex is not None, f'Did not throw an exception; got {val}')
-    fmt_tb = '  >' + '\n  >'.join('\n'.join(tb).splitlines())
-    self.assertLess(len(tb), 3, f'Stack trace is ugly:\n{fmt_tb}')
     ex_lines = ex.splitlines()
-    self.assertGreater(len(ex_lines), 15, f'Yamlet trace is too small:\n{ex}')
-    self.assertLess(len(ex_lines), 30, f'Yamlet trace is too large:\n{ex}')
+    fex = '  > ' + '\n  > '.join('\n'.join(ex_lines).splitlines())
+    self.assertLess(len(tb), 3, f'Stack trace is ugly:\n{fex}')
+    self.assertGreater(len(ex_lines), 15, f'Yamlet trace is too small:\n{fex}')
+    self.assertLess(len(ex_lines), 30, f'Yamlet trace is too large:\n{fex}')
 
 
 if __name__ == '__main__':
