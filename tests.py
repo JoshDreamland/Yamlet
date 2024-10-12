@@ -229,6 +229,79 @@ class TestConditionals(unittest.TestCase):
     self.assertEqual(y['t3']['conditionals']['val'], 'Color: green')
     self.assertEqual(y['t3']['conditionals']['color'], 'green')
 
+  def test_if_statement_templating(self):
+    YAMLET = '''# Yamlet
+    t0:
+      !if animal == 'fish':
+        environment: water
+      !elif animal == 'dog':
+        attention: pats
+        toys: !expr ([favorite_toy])
+      !elif animal == 'cat':
+        diet: meat
+      !else :
+        recommendation: specialist
+    t1: !expr |
+        t0 { animal: 'cat' }
+    t2: !composite
+      - t0
+      - animal: dog
+        favorite_toy: squeaky ball
+    t3: !expr |
+        t0 { animal: 'fish' }
+    t4: !expr |
+        t0 { animal: 'squirrel' }
+    '''
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+    print(y['t1'])
+    self.assertEqual(y['t1']['environment'], 'water')
+    self.assertEqual(y['t2']['attention'], 'pats')
+    self.assertEqual(y['t2']['toys'], ['squeaky ball'])
+    self.assertEqual(y['t3']['diet'], 'meat')
+    self.assertEqual(y['t4']['recommendation'], 'specialist')
+    self.assertEqual(len(y['t1']), 1)
+    self.assertEqual(len(y['t2']), 2)
+    self.assertEqual(len(y['t3']), 1)
+    self.assertEqual(len(y['t4']), 1)
+
+  def test_if_statements(self):
+    YAMLET = '''# Yamlet
+    !if (1 + 1 == 2):
+      a: 10
+      b: { ba: 11 }
+    !else :
+      crap: value
+    !if ('shark' == 'fish'):
+      more-crap: values
+    !elif ('crab' == 'crab'):
+      b: { bb: 12 }
+      c: 13
+    !else :
+      still-crap: 10
+    !if ('crab' == 'crab'):
+      d: 14
+    !else :
+      crapagain: 2
+    '''
+    print('Beginning weird test')
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+    print(type(y), ':')
+    print(y)
+    self.assertTrue('a' in y)
+    self.assertTrue('b' in y)
+    self.assertTrue('c' in y)
+    self.assertTrue('d' in y)
+    self.assertEqual(y['a'], 10)
+    self.assertEqual(y['b']['ba'], 11)
+    self.assertEqual(y['b']['bb'], 12)
+    self.assertEqual(y['c'], 13)
+    self.assertEqual(y['d'], 14)
+    self.assertFalse('crap' in y)
+    self.assertFalse('more-crap' in y)
+    self.assertFalse('crapagain' in y)
+
 
 class TestRecursion(unittest.TestCase):
   def test_recursion(self):

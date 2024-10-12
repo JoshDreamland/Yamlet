@@ -7,6 +7,8 @@ import sys
 import token
 import tokenize
 
+ConstructorError = ruamel.yaml.constructor.ConstructorError
+
 class YamletOptions:
   Error = ['error']
   def __init__(self, import_resolver=None, missing_name_value=Error,
@@ -19,8 +21,10 @@ class YamletOptions:
 class GclDict(dict):
   def __init__(self, *args,
                gcl_parent, gcl_super, gcl_opts, yaml_point,
-               **kwargs):
-    super().__init__(*args, **kwargs)
+               yaml_pairs=None, **kwargs):
+    if yaml_pairs is None: super().__init__(*args, **kwargs)
+    else: super().__init__(self._FilterGclDirectives(yaml_pairs),
+                           *args, **kwargs)
     self._gcl_parent_ = gcl_parent
     self._gcl_super_ = gcl_super
     self._gcl_opts_ = gcl_opts
@@ -101,25 +105,6 @@ class GclDict(dict):
       res.__setitem__(k, v)
     return res
 
-  def _gcl_clone_unresolved_(self):
-    if not self._gcl_has_unresolved_(): return self
-    def maybe_clone(v):
-      if isinstance(v, GclDict): return v._gcl_clone_unresolved_()
-      if isinstance(v, DeferredValue):
-        _DebugPrint(f'Clone {type(v).__name__} `{v._gcl_construct_}`')
-        return copy.copy(v)
-      return v
-    return GclDict({
-        k: maybe_clone(v) for k, v in self._gcl_noresolve_items_()},
-        gcl_parent=self._gcl_parent_, gcl_opts=self._gcl_opts_,
-        yaml_point=self._yaml_point_)
-
-  def _gcl_has_unresolved_(self):
-    for k, v in self._gcl_noresolve_items_():
-      if isinstance(v, DeferredValue): return True
-      if isinstance(v, GclDict) and v._gcl_has_unresolved_(): return True
-    return False
-
   def _gcl_noresolve_values_(self): return super().values()
   def _gcl_noresolve_items_(self): return super().items()
   def _gcl_noresolve_get_(self, k): return super().__getitem__(k)
@@ -134,17 +119,13 @@ class YamletLoader(ruamel.yaml.YAML):
     self.constructor.yaml_base_dict_type = GclDict
     self.representer.add_representer(GclDict, self.representer.represent_dict)
 
-    def ConstructGclDict(loader, node):
-      return GclDict(loader.construct_pairs(node),
-                     gcl_parent=None, gcl_super=None,
-                     gcl_opts=gcl_opts,
-                     yaml_point=YamlPoint(
-                        start=node.start_mark, end=node.end_mark))
+    def UndefinedConstructor(self, node):
+      raise ConstructorError(
+          None, None,  f'No constructor bound for tag `{node.tag}`',
+          node.start_mark)
 
-    # Override the constructor to always return our custom dict type
-    self.constructor.add_constructor(
-        ruamel.yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-        ConstructGclDict)
+    # Raise on undefined tags
+    self.constructor.add_constructor(None, UndefinedConstructor)
 
 
 class ExceptionWithYamletTrace(Exception):
@@ -348,6 +329,94 @@ class ExpressionToEvaluate(DeferredValue):
     return self._gcl_cache_
 
 
+class PreprocessingDirective(DeferredValue):
+  def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
+  def _gcl_resolve_(self, ectx):
+    ectx.Raise(
+        NotImplementedError, 'Internal error: Yamlet preprocessing directive ' +
+        type(self).__name__ + 'should have been handled during composition.')
+
+
+class YamletIfStatement(PreprocessingDirective):
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.if_true = None
+    self.elif_directives = []
+    self.else_directive = None
+
+  def _gcl_resolve_(self, ectx):
+    if not self._gcl_cache_:
+      expl = 'Evaluating `!if`'
+      if self.elif_directives: expl += '-`!elif`'
+      if self.else_directive: expl += '-`!else`'
+      expl += ' directive'
+      self._gcl_provenance_ = ectx.BranchForDeferredEval(self, expl)
+      if _GclExprEval(self._gcl_construct_, self._gcl_provenance_):
+        self._gcl_cache_ = self.if_true
+        return self._gcl_cache_
+      for elifs in self.elif_directives:
+        if _GclExprEval(elifs._gcl_construct_, self._gcl_provenance_):
+          self._gcl_cache_ = elifs.if_true
+          return self._gcl_cache_
+      if self.else_directive:
+        self._gcl_cache_ = self.else_directive.if_true
+      else:
+        self._gcl_cache_ = ectx.NewGclDict()
+    return self._gcl_cache_
+
+
+class YamletElifStatement(PreprocessingDirective): pass
+class YamletElseStatement(PreprocessingDirective): pass
+
+
+class PreprocessingTuple(DeferredValue):
+  def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
+  def FromMapping(mapping_pairs, gcl_opts, yaml_point):
+    filtered_pairs = []
+    preprocessors = []
+    if_directive = None
+    for k, v in mapping_pairs:
+      if isinstance(k, PreprocessingDirective):
+        if isinstance(k, YamletIfStatement):
+          k.if_true = v
+          if_directive = k
+          preprocessors.append(if_directive)
+        elif isinstance(k, YamletElifStatement):
+          if not if_directive:
+            raise ConstructorError(None, None,
+                '`!elif` directive is not paired to an `!if` directive.',
+                v._yaml_point_.start)
+          k.if_true = v
+          if_directive.elif_directives.append(k)
+        elif isinstance(k, YamletElseStatement):
+          if not if_directive:
+            raise ConstructorError(None, None,
+                '`!else` directive is not paired to an `!if` directive.',
+                v._yaml_point_.start)
+          k.if_true = v
+          if_directive.else_statement = k
+          if_directive = None  # Stops more elif/else directives from attaching
+      else:
+        if_directive = None
+        filtered_pairs.append((k, v))
+    base_dict = GclDict(filtered_pairs,
+                        gcl_parent=None, gcl_super=None, gcl_opts=gcl_opts,
+                        yaml_point=yaml_point)
+    if not preprocessors: return base_dict
+    return PreprocessingTuple((base_dict, preprocessors), yaml_point)
+
+  def _gcl_resolve_(self, ectx):
+    if not self._gcl_cache_:
+      base_dict, directives = self._gcl_construct_
+      new_dict = base_dict._gcl_clone_(ectx.scope, new_super=base_dict._gcl_super_)
+      self._gcl_provenance_ = ectx.BranchForDeferredEval(
+          self, f'Processing Yamlet directives')
+      for directive in directives:
+        new_dict._gcl_merge_(directive._gcl_resolve_(ectx), ectx)
+      self._gcl_cache_ = new_dict
+    return self._gcl_cache_
+
+
 class GclLambda:
   def __init__(self, expr, yaml_point):
     self.yaml_point = yaml_point
@@ -356,6 +425,7 @@ class GclLambda:
         f'Lambda does not delimit arguments from expression: `{expr}`'))
     self.params = [x.strip() for x in expr[:sep].split(',')]
     self.expression = expr[sep+1:]
+
   def Callable(self, name, ectx):
     params = self.params
     def LambdaEvaluator(*args, **kwargs):
@@ -417,35 +487,57 @@ def DynamicScopeLoader(opts=YamletOptions()):
     res._gcl_loader_ = LoadCachedFile
     return res
 
+  def ConstructGclDict(loader, node):
+    return PreprocessingTuple.FromMapping(
+        loader.construct_pairs(node), gcl_opts=opts,
+        yaml_point=YamlPoint(start=node.start_mark, end=node.end_mark))
+
   def GclComposite(loader, node):
     marks = YamlPoint(node.start_mark, node.end_mark)
     if isinstance(node, ruamel.yaml.ScalarNode):
       return TupleListToComposite(loader.construct_scalar(node).split(), marks)
     if isinstance(node, ruamel.yaml.SequenceNode):
       return TupleListToComposite(loader.construct_sequence(node), marks)
-    raise ArgumentError(f'Got unexpected node type: {repr(node)}')
+    raise ConstructorError(None, None,
+        f'Yamlet `!composite` got unexpected node type: {repr(node)}',
+        node.start_mark)
 
-  def GclStrFormat(loader, node):
-    return StringToSubstitute(loader.construct_scalar(node),
-                              YamlPoint(node.start_mark, node.end_mark))
+  def ScalarNode(tp):
+    def Constructor(loader, node):
+      return tp(loader.construct_scalar(node),
+                YamlPoint(node.start_mark, node.end_mark))
+    return Constructor
 
-  def GclExpression(loader, node):
-    return ExpressionToEvaluate(
-        node.value, YamlPoint(node.start_mark, node.end_mark))
-
-  def GclLambdaC(loader, node):
-    return GclLambda(
-        node.value, YamlPoint(node.start_mark, node.end_mark))
+  def ConstructElse(loader, node):
+    marks = YamlPoint(node.start_mark, node.end_mark)
+    if isinstance(node, ruamel.yaml.ScalarNode):
+      s = loader.construct_scalar(node)
+      if s: raise ruamel.yaml.constructor.ConstructorError(
+          None, None,
+          f'A Yamlet `!else` should not have a value attached, '
+          f'but contained {s}', node.start_mark)
+      return YamletElseStatement('', marks)
+    raise ruamel.yaml.constructor.ConstructorError(
+        f'Yamlet `!else` got unexpected node type: {repr(node)}')
 
   y = YamletLoader(gcl_opts=opts)
+  y.constructor.add_constructor(
+      ruamel.yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, ConstructGclDict)
   y.constructor.add_constructor("!import", GclImport)
   y.constructor.add_constructor("!composite", GclComposite)
-  y.constructor.add_constructor("!fmt", GclStrFormat)
-  y.constructor.add_constructor("!expr", GclExpression)
-  y.constructor.add_constructor("!lambda", GclLambdaC)
+  y.constructor.add_constructor("!fmt", ScalarNode(StringToSubstitute))
+  y.constructor.add_constructor("!expr", ScalarNode(ExpressionToEvaluate))
+  y.constructor.add_constructor("!lambda", ScalarNode(GclLambda))
+  y.constructor.add_constructor("!if", ScalarNode(YamletIfStatement))
+  y.constructor.add_constructor("!elif", ScalarNode(YamletElifStatement))
+  y.constructor.add_constructor("!else",  ConstructElse)
+  y.constructor.add_constructor("!else:", ConstructElse)
 
   def ProcessYamlGcl(ygcl):
     tup = y.load(ygcl)
+    if isinstance(tup, DeferredValue):
+      tup = tup._gcl_resolve_(_EvalContext(None, opts, tup._yaml_point_,
+                              'Evaluating preprocessors in Yamlet document.'))
     _RecursiveUpdateParents(tup, None, opts)
     return tup
 
@@ -601,6 +693,36 @@ def _EvalGclAst(et, ectx):
       match type(et.op):
         case ast.Add: return l + r
       ectx.Raise(NotImplementedError, f'Unsupported binary operator `{et.op}`.')
+    case ast.Compare:
+      l = ev(et.left)
+      for op, r in zip(et.ops, et.comparators):
+        r = ev(r)
+        match type(op):
+          case ast.Eq:
+            if l != r: return False
+            print(f'True: {l} == {r}')
+          case ast.NotEq:
+            if l == r: return False
+          case ast.Lt:
+            if l >= r: return False
+          case ast.LtE:
+            if l > r: return False
+          case ast.Gt:
+            if l <= r: return False
+          case ast.GtE:
+            if l < r: return False
+          case ast.Is:
+            if l is not r: return False
+          case ast.IsNot:
+            if l is r: return False
+          case ast.In:
+            if l not in r: return False
+          case ast.NotIn:
+            if l in r: return False
+          case _: ectx.Raise(NotImplementedError,
+                             f'Unsupported comparison operator `{op}`.')
+        l = r
+      return True
     case ast.Call:
       fun, fun_name = None, None
       if isinstance(et.func, ast.Name):

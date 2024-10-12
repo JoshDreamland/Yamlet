@@ -32,9 +32,12 @@ The biggest change that would make this project nicer is if YAML supported
 raw strings (literal style) for specific constructors without the use of a
 particular style token. In particular, it's annoying having to insert a
 pipe and newline before any expression that you'd like to be evaluated
-GCL-style instead of YAML style.
+GCL-style instead of YAML style. Similarly, it would be nice if I could
+define an `!else:` constructor that starts a mapping block. Until then,
+the best workaround I can recommend is habitually parenthesizing every Yamlet
+expression, and putting spaces after all your tokens like it's the 80s.
 
-To work around this a bit, I've added `!fmt` and `!composite` tags on top of
+To help work around this, I've added `!fmt` and `!composite` tags on top of
 the core `!expr` tag so that the YAML parser can handle the string interpreting
 and nested tuple parsing. So in the below examples, I could have used
 `coolbeans: !fmt 'Hello, {subject}! I say {cool} {beans}!'` instead of that
@@ -89,11 +92,36 @@ I mean, that's by design; this is how GCL templating works. Each tuple you
 chain onto the list overwrites the values in the previous tuples, and then
 expressions inherited from those tuples will use the new values.
 
+Additionally, you can use tuple composition to simply string together
+conditionals:
+
+```yaml
+t: !composite
+  - !if (1 + 1 == 2):
+    a: 10
+    b: { ba: 11 }
+  - !else
+    crap: value
+  - !if ('shark' == 'fish'):
+    more-crap: values
+  - !else
+    b: { bb: 12 }
+    c: 13
+  - !if ('crab' == 'crab'):
+    d: 14
+  - !else
+    crapagain: 2
+```
+
+Note that specifically because of the aforementioned problems, you must use this
+list flow in conditional statements (with ` - `), or else be extremely careful
+to put a space between your `!else` tag and the following colon.
 
 ## Features
 The following are implemented:
 - String formatting (as above)
 - GCL-Like tuple composition
+- Conditionals for composition flows
 - File import (to allow splitting up configs or splitting out templates)
 - Lambda expressions
 - Custom functions (defined in Python)
