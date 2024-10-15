@@ -158,6 +158,52 @@ class TestTupleCompositing(unittest.TestCase):
     y = loader.loads(YAMLET)
     self.assertEqual(y['t2']['sub']['deferred'], 'Hello, world!')
 
+  def test_nullification(self):
+    YAMLET = '''# YAMLET
+    t1:
+      a: apple
+      b: boy
+      c: cat
+      d: dog
+    t2:
+      b: !null
+      c: !null
+      d: !external
+    t3: !expr t1 t2
+    '''
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+    self.assertEqual(len(y['t1']), 4)
+    self.assertEqual(len(y['t2']), 3)
+    self.assertEqual(len(y['t3']), 2)
+    self.assertEqual(y['t3'], {'a': 'apple', 'd': 'dog'})
+
+  def test_external_access(self):
+    YAMLET = '''# YAMLET
+    t1:
+      v: value
+      sub:
+        v: !external
+        exp: !expr v
+    '''
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+    with AssertRaisesCleanException(ValueError):
+      val = y['t1']['sub']['exp']
+      self.fail(f'Did not throw an exception; got `{val}`')
+
+  def test_null_access(self):
+    YAMLET = '''# YAMLET
+    t1:
+      v: value
+      sub:
+        v: !null
+        exp: !expr v
+    '''
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+    self.assertEqual( y['t1']['sub']['exp'], 'value')
+
 
 class TestInheritance(unittest.TestCase):
   def test_up_and_super(self):
@@ -188,6 +234,27 @@ class TestStringMechanics(unittest.TestCase):
     loader = yamlet.DynamicScopeLoader()
     y = loader.loads(YAMLET)
     self.assertEqual(y['v3'], '{Hello}, {{world}}{s}!')
+
+
+class TestFunctions(unittest.TestCase):
+  def test_escaped_braces(self):
+    YAMLET = '''# Yamlet
+    t:
+      v: !expr func(x)
+      w: !expr func('I am not called.')
+      x: !expr func('Hello, ')
+    '''
+    side_effect = []
+    uniq = ['world!']
+    def func(x):
+      side_effect.append(x)
+      return uniq
+
+    opts = yamlet.YamletOptions(functions={'func': func})
+    loader = yamlet.DynamicScopeLoader(opts)
+    y = loader.loads(YAMLET)
+    self.assertTrue(y['t']['v'] is uniq)
+    self.assertEqual(side_effect, ['Hello, ', ['world!']])
 
 
 class TestConditionals(unittest.TestCase):
