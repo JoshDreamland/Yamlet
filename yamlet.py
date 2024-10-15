@@ -20,16 +20,15 @@ class YamletOptions:
 
 class GclDict(dict):
   def __init__(self, *args,
-               gcl_parent, gcl_super, gcl_opts, yaml_point,
-               yaml_pairs=None, **kwargs):
-    if yaml_pairs is None: super().__init__(*args, **kwargs)
-    else: super().__init__(self._FilterGclDirectives(yaml_pairs),
-                           *args, **kwargs)
+               gcl_parent, gcl_super, gcl_opts, yaml_point, preprocessors,
+               **kwargs):
+    super().__init__(*args, **kwargs)
     self._gcl_parent_ = gcl_parent
     self._gcl_super_ = gcl_super
     self._gcl_opts_ = gcl_opts
-    self._yaml_point_ = yaml_point
+    self._gcl_preprocessors_ = preprocessors or {}
     self._gcl_provenance_ = {}
+    self._yaml_point_ = yaml_point
 
   def _resolvekv(self, k, v, ectx=None):
     bt_msg = f'Lookup of `{k}` in this scope'
@@ -40,7 +39,7 @@ class GclDict(dict):
         r = v._gcl_resolve_(ectx or
             _EvalContext(self, self._gcl_opts_, self._yaml_point_, name=bt_msg))
         # XXX: This is a nice optimization but breaks accessing templates before
-        # their derived types. We need to let the caching done in DeferredValue 
+        # their derived types. We need to let the caching done in DeferredValue
         # handle it for that case.
         # self.__setitem__(k, r)
         return r
@@ -58,6 +57,9 @@ class GclDict(dict):
     except ExceptionWithYamletTrace as e: exception_during_access = e.rewind()
     raise exception_during_access
 
+  def __contains__(self, key):
+    return super().get(key, null) is not null
+
   def items(self):
     return ((k, self._resolvekv(k, v)) for k, v in super().items())
 
@@ -74,7 +76,7 @@ class GclDict(dict):
       return f'`{k}` was inherited from another tuple {_TuplePointStr(inherited)}'
     return f'`{k}` was declared directly in this tuple {_TuplePointStr(self)}'
 
-  def _gcl_merge_(self, other, ectx):
+  def _gcl_merge_(self, other, ectx, preprocess=True):
     if not isinstance(other, GclDict):
       raise TypeError('Expected GclDict to merge.')
     for k, v in other._gcl_noresolve_items_():
@@ -95,11 +97,31 @@ class GclDict(dict):
       else:
         self._gcl_provenance_[k] = other._gcl_provenance_.get(k, other)
         super().__setitem__(k, v)
+    for k, v in other._gcl_preprocessors_.items():
+      if k not in self._gcl_preprocessors_:
+        self._gcl_preprocessors_[k] = v._gcl_clone_preprocessor_()
+    if preprocess: self._gcl_preprocess_(ectx)
+
+  def _gcl_preprocess_(self, ectx):
+    if not self._gcl_parent_:
+      self._gcl_parent_ = ectx.scope
+      assert self._gcl_parent_ is not self
+    ectx = ectx.Branch('Yamlet Preprocessing', ectx._trace_point, self)
+    for _, v in self._gcl_preprocessors_.items():
+      v._gcl_preprocess_(ectx)
+    erased = set()
+    for k, v in self._gcl_noresolve_items_():
+      if isinstance(v, DeferredValue) and v._gcl_is_null_(ectx):
+        erased.add(k)
+    for k in erased: super().pop(k)
 
   def _gcl_clone_(self, new_parent, new_super=None):
     '''Clones GclDicts recursively, updating parents.'''
+    cloned_preprocessors = {k: v._gcl_clone_preprocessor_()
+                            for k, v in self._gcl_preprocessors_.items()}
     res = GclDict(gcl_parent=new_parent, gcl_super=new_super or self,
-                  gcl_opts=self._gcl_opts_, yaml_point=self._yaml_point_)
+                  gcl_opts=self._gcl_opts_, preprocessors=cloned_preprocessors,
+                  yaml_point=self._yaml_point_)
     for k, v in self._gcl_noresolve_items_():
       if isinstance(v, GclDict): v = v._gcl_clone_(res)
       res.__setitem__(k, v)
@@ -128,17 +150,51 @@ class YamletLoader(ruamel.yaml.YAML):
     self.constructor.add_constructor(None, UndefinedConstructor)
 
 
+def _NoneType(name):
+  class Nothing:
+    def __bool__(self): return False
+    def __nonzero__(self): return False
+    def __str__(self): return name
+    def __repr__(self): return name
+  return Nothing
+
+
+def _BuiltinNones():
+  class external(_NoneType('external')): pass
+  class null(_NoneType('null')): pass
+  class undefined(_NoneType('undefined')): pass
+  class empty(_NoneType('empty')): pass
+  return external(), null(), undefined(), empty()
+external, null, _undefined, _empty = _BuiltinNones()
+
+
+'''▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+░▒▓██████████████████████████████████████████████████████████████████████████▓▒░
+░▒▓██▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀██▓▒░
+░▒▓██  Context tracking:  Information about (and used during) evaluation.  ██▓▒░
+░▒▓██▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄██▓▒░
+░▒▓██████████████████████████████████████████████████████████████████████████▓▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+  ░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒'''
+
+
+def exceptions(bc):
+  '''Looks like a namespace in stack traces but is really a function.'''
+  class YamletException(bc):
+    def __init__(self, message, details):
+      super().__init__(message)
+      self.details = details
+  return YamletException
+
+
 class ExceptionWithYamletTrace(Exception):
   def __init__(self, ex_class, message):
     super().__init__(message)
     self.ex_class = ex_class
     self.traced_message = message
   def rewind(self):
-    class YamletException(self.ex_class):
-      def __init__(self, message, details):
-        super().__init__(message)
-        self.details = details
-    return YamletException(self.traced_message, self)
+    return exceptions(self.ex_class)(self.traced_message, self)
 
 
 class YamlPoint:
@@ -181,6 +237,7 @@ class _EvalContext:
         gcl_parent=gcl_parent or self.scope,
         gcl_super=gcl_super,
         gcl_opts=self.opts,
+        preprocessors=None,
         yaml_point=self._trace_point)
 
   def Branch(self, name, yaml_point, scope):
@@ -222,7 +279,7 @@ class _EvalContext:
     me = me[0].lower() + me[1:]
     me = f'{_prep} {me} {str(self._trace_point.start).strip()}'
     me = ind + f'{ind}\n'.join(me.splitlines())
-    ccount = ((len(self._children) if self._children else 0) + 
+    ccount = ((len(self._children) if self._children else 0) +
               (len(self._name_deps) if self._name_deps else 0))
     if ccount > 1:
       nindent = start_indent + indent
@@ -242,7 +299,7 @@ class _EvalContext:
   def Raise(self, ex_class, message_sentence, e=None):
     if message_sentence == message_sentence.rstrip(): message_sentence += ' '
     raise ExceptionWithYamletTrace(ex_class,
-        'An error occurred while evaluating a Yamlet expression:\n'
+        f'{ex_class.__name__} occurred while evaluating a Yamlet expression:\n'
         + '\n'.join(_EvalContext._PrettyError(t) for t in self.FullTrace())
         + f'\n{message_sentence}See above trace for details.') from e
 
@@ -261,163 +318,182 @@ class _EvalContext:
     return trace[::-1]
 
 
+'''▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+░▒▓██████████████████████████████████████████████████████████████████████████▓▒░
+░▒▓██▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀██▓▒░
+░▒▓██  Deferred Value:  Unit for template value application.               ██▓▒░
+░▒▓██▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄██▓▒░
+░▒▓██████████████████████████████████████████████████████████████████████████▓▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+  ░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒'''
+
 class DeferredValue:
   def __init__(self, data, yaml_point):
     self._gcl_construct_ = data
-    self._gcl_cache_ = None
+    self._gcl_cache_ = _empty
     self._yaml_point_ = yaml_point
+
   def _gcl_resolve_(self, ectx):
-    raise NotImplementedError('Abstract method Resolve.')
+    if self._gcl_cache_ is _empty:
+      self._gcl_provenance_ = ectx.BranchForDeferredEval(
+          self, self._gcl_explanation_())
+      self._gcl_cache_ = self._gcl_evaluate_(
+          self._gcl_construct_, self._gcl_provenance_)
+    return self._gcl_cache_
+
   def _gcl_clone_deferred_(self):
     res = copy.copy(self)
-    res._gcl_cache_ = None
+    res._gcl_cache_ = _empty
     return res
+
+  def _gcl_is_null_(self, ectx): return False
+
+  def __str__(self):
+    return (f'<Unevaluated: {self._gcl_construct_}>' if not self._gcl_cache_
+            else str(self._gcl_cache_))
+  def __repr__(self):
+    return f'<Unevaluated: {self._gcl_construct_}>'
 
 
 class ModuleToLoad(DeferredValue):
   def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
-  def _gcl_resolve_(self, ectx):
-    if not self._gcl_cache_:
-      self._gcl_provenance_ = ectx.BranchForDeferredEval(
-          self, f'Resolving import `{self._gcl_construct_}`')
-      fn = _ResolveStringValue(self._gcl_construct_, self._gcl_provenance_)
-      fn = pathlib.Path(ectx.opts.import_resolver(fn))
-      _DebugPrint(f'Load the following module: {fn}')
-      if not fn.exists():
-        if self._gcl_construct_ == fn:
-          ectx.Raise(FileNotFoundError,
-                     f'Could not import YamlBcl file: {self.data}')
+
+  def _gcl_explanation_(self):
+    return f'Resolving import `{self._gcl_construct_}`'
+
+  def _gcl_evaluate_(self, value, ectx):
+    fn = _ResolveStringValue(value, ectx)
+    fn = pathlib.Path(ectx.opts.import_resolver(fn))
+    _DebugPrint(f'Load the following module: {fn}')
+    if not fn.exists():
+      if value == fn:
         ectx.Raise(FileNotFoundError,
-                   f'Could not import YamlBcl file: `{fn}`\n'
-                   f'As evaluated from this expression: `{self.data}`.\n')
-      loaded = self._gcl_loader_(fn)
-      _DebugPrint(f'Loaded:\n{loaded}')
-      self._gcl_cache_ = loaded
-    return self._gcl_cache_
+                   f'Could not import YamlBcl file: {value}')
+      ectx.Raise(FileNotFoundError,
+                 f'Could not import YamlBcl file: `{fn}`\n'
+                 f'As evaluated from this expression: `{value}`.\n')
+    loaded = self._gcl_loader_(fn)
+    _DebugPrint('Loaded:\n', loaded)
+    return loaded
 
 
 class StringToSubstitute(DeferredValue):
   def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
-  def _gcl_resolve_(self, ectx):
-    if not self._gcl_cache_:
-      self._gcl_provenance_ = ectx.BranchForDeferredEval(
-          self, f'Evaluating string `{self._gcl_construct_}`')
-      self._gcl_cache_ = _ResolveStringValue(
-          self._gcl_construct_, self._gcl_provenance_)
-    return self._gcl_cache_
+  def _gcl_explanation_(self):
+    return f'Evaluating string `{self._gcl_construct_}`'
+  def _gcl_evaluate_(self, value, ectx):
+    return _ResolveStringValue(value, ectx)
 
 
 class TupleListToComposite(DeferredValue):
   def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
-  def _gcl_resolve_(self, ectx):
-    if not self._gcl_cache_:
-      self._gcl_provenance_ = ectx.BranchForDeferredEval(
-          self, f'Compositing tuple list `{self._gcl_construct_}`')
-      self._gcl_cache_ = _CompositeYamlTupleList(
-          self._gcl_construct_, self._gcl_provenance_)
-    return self._gcl_cache_
+  def _gcl_explanation_(self):
+    return f'Compositing tuple list `{self._gcl_construct_}`'
+  def _gcl_evaluate_(self, value, ectx):
+      return _CompositeYamlTupleList(value, ectx)
 
 
 class ExpressionToEvaluate(DeferredValue):
   def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
-  def _gcl_resolve_(self, ectx):
-    if not self._gcl_cache_:
-      self._gcl_provenance_ = ectx.BranchForDeferredEval(
-          self, f'Evaluating expression `{self._gcl_construct_.strip()}`')
-      self._gcl_cache_ = _GclExprEval(
-          self._gcl_construct_, self._gcl_provenance_)
-    return self._gcl_cache_
+  def _gcl_explanation_(self):
+    return f'Evaluating expression `{self._gcl_construct_.strip()}`'
+  def _gcl_evaluate_(self, value, ectx):
+    return _GclExprEval(value, ectx)
 
 
-class PreprocessingDirective(DeferredValue):
+class IfLadderTableIndex(DeferredValue):
   def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
-  def _gcl_resolve_(self, ectx):
-    ectx.Raise(
-        NotImplementedError, 'Internal error: Yamlet preprocessing directive ' +
-        type(self).__name__ + 'should have been handled during composition.')
+  def _gcl_explanation_(self):
+    return f'Pre-evaluating if-else ladder'
+  def _gcl_evaluate_(self, value, ectx):
+    for i, cond in enumerate(value.cond_dvals):
+      if cond._gcl_resolve_(ectx):
+        return i
+    return -1
 
 
-class YamletIfStatement(PreprocessingDirective):
+class IfLadderItem(DeferredValue):
   def __init__(self, *args, **kwargs):
     super().__init__(*args, **kwargs)
-    self.if_true = None
-    self.elif_directives = []
-    self.else_directive = None
+    self._gcl_cache_table_entry_ = _empty
 
-  def _gcl_resolve_(self, ectx):
-    if not self._gcl_cache_:
-      expl = 'Evaluating `!if`'
-      if self.elif_directives: expl += '-`!elif`'
-      if self.else_directive: expl += '-`!else`'
-      expl += ' directive'
-      self._gcl_provenance_ = ectx.BranchForDeferredEval(self, expl)
-      if _GclExprEval(self._gcl_construct_, self._gcl_provenance_):
-        self._gcl_cache_ = self.if_true
-        return self._gcl_cache_
-      for elifs in self.elif_directives:
-        if _GclExprEval(elifs._gcl_construct_, self._gcl_provenance_):
-          self._gcl_cache_ = elifs.if_true
-          return self._gcl_cache_
-      if self.else_directive:
-        self._gcl_cache_ = self.else_directive.if_true
+  def _gcl_explanation_(self):
+    return f'Evaluating item in if-else ladder'
+
+  def _gcl_ladder_table_lookup_(self, value, ectx, recompute_cache):
+    if self._gcl_cache_table_entry_ is _empty:
+      ladder, table = value
+      ladder = ectx.scope._gcl_preprocessors_.get(id(ladder))
+      ectx.Assert(ladder,
+                  'Internal error: The preprocessor `!if` directive from which '
+                  'this value was assigned was not inherited...')
+      index = ladder.index._gcl_cache_
+      if index is _empty:
+        if not recompute_cache: return external  # And do NOT cache!
+        # We will retry this value later if a user requests it,
+        # which would be an actual error case.
+        index = ladder.index._gcl_resolve_(ectx)
+      self._gcl_cache_table_entry_ = table[index]
+    return self._gcl_cache_table_entry_
+
+  def _gcl_evaluate_(self, value, ectx):
+    result = self._gcl_ladder_table_lookup_(value, ectx, True)
+    while isinstance(result, DeferredValue): result = result._gcl_resolve_(ectx)
+    if result is _undefined: return null
+    return result
+
+  def _gcl_is_null_(self, ectx):
+    result = self._gcl_ladder_table_lookup_(self._gcl_construct_, ectx, False)
+    if isinstance(result, DeferredValue): return result._gcl_is_null_(ectx)
+    return result is null or result is _undefined
+
+
+class FlatCompositor(DeferredValue):
+  def __init__(self, *args, varname, **kwargs):
+    super().__init__(*args, **kwargs)
+    self._gcl_varname_ = varname
+  def _gcl_explanation_(self):
+    return f'Compositing values given for `{self._gcl_varname_}`'
+
+  def _gcl_evaluate_(self, value, ectx):
+    active_composite = []
+    for term in value:
+      while isinstance(term, DeferredValue): term = term._gcl_resolve_(ectx)
+      if term: active_composite.append(term)
       else:
-        self._gcl_cache_ = ectx.NewGclDict()
-    return self._gcl_cache_
+        if term is _undefined: continue
+        if term is external: ectx.Raise(ValueError,
+            f'External value found while evaluating `{self._gcl_varname_}`.')
+        active_composite.append(term)
+    if len(active_composite) == 1: return active_composite[0]
+    if any(not isinstance(term, GclDict) for term in active_composite):
+      ectx.Raise(ValueError, f'Multiple non-compisitable values given for '
+                             f'`{self._gcl_varname_}`.')
+    return _CompositeGclTuples(active_composite, ectx)
 
+  def _gcl_is_null_(self, ectx):
+    for term in self._gcl_construct_:
+      if isinstance(term, DeferredValue) and not term._gcl_is_null_(ectx):
+        return False
+    return True
 
-class YamletElifStatement(PreprocessingDirective): pass
-class YamletElseStatement(PreprocessingDirective): pass
-
-
-class PreprocessingTuple(DeferredValue):
-  def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
-  def FromMapping(mapping_pairs, gcl_opts, yaml_point):
-    filtered_pairs = []
-    preprocessors = []
-    if_directive = None
-    for k, v in mapping_pairs:
-      if isinstance(k, PreprocessingDirective):
-        if isinstance(k, YamletIfStatement):
-          k.if_true = v
-          if_directive = k
-          preprocessors.append(if_directive)
-        elif isinstance(k, YamletElifStatement):
-          if not if_directive:
-            raise ConstructorError(None, None,
-                '`!elif` directive is not paired to an `!if` directive.',
-                v._yaml_point_.start)
-          k.if_true = v
-          if_directive.elif_directives.append(k)
-        elif isinstance(k, YamletElseStatement):
-          if not if_directive:
-            raise ConstructorError(None, None,
-                '`!else` directive is not paired to an `!if` directive.',
-                v._yaml_point_.start)
-          k.if_true = v
-          if_directive.else_statement = k
-          if_directive = None  # Stops more elif/else directives from attaching
-      else:
-        if_directive = None
-        filtered_pairs.append((k, v))
-    base_dict = GclDict(filtered_pairs,
-                        gcl_parent=None, gcl_super=None, gcl_opts=gcl_opts,
-                        yaml_point=yaml_point)
-    if not preprocessors: return base_dict
-    return PreprocessingTuple((base_dict, preprocessors), yaml_point)
-
-  def _gcl_resolve_(self, ectx):
-    if not self._gcl_cache_:
-      base_dict, directives = self._gcl_construct_
-      new_dict = base_dict._gcl_clone_(ectx.scope, new_super=base_dict._gcl_super_)
-      self._gcl_provenance_ = ectx.BranchForDeferredEval(
-          self, f'Processing Yamlet directives')
-      for directive in directives:
-        new_dict._gcl_merge_(directive._gcl_resolve_(ectx), ectx)
-      self._gcl_cache_ = new_dict
-    return self._gcl_cache_
+  def _gcl_clone_deferred_():
+    res = super()._gcl_clone_deferred_()
+    for i, v in enumerate(res._gcl_construct_):
+      if isinstance(v, DeferredValue):
+        res._gcl_construct_[i] = v._gcl_clone_deferred_()
+      elif isinstance(v, GclDict):
+        res._gcl_construct_[i] = v._gcl_clone_(new_parent=v._gcl_parent_)
 
 
 class GclLambda:
+  '''GclLambda isn't actually a DeferredValue, but they appear similar in YAML.
+
+  The glass actually provides an interface to make itself callable, and the
+  `_EvalGclAst` checks for its type directly before raising that an object
+  is not callable.
+  '''
   def __init__(self, expr, yaml_point):
     self.yaml_point = yaml_point
     sep = expr.find(':')
@@ -450,19 +526,160 @@ class GclLambda:
     return LambdaEvaluator
 
 
-def _DebugPrint(msg): pass #print(msg)
-def _GclWarning(msg):
-  print(msg, file=sys.stderr)
+class PreprocessingTuple(DeferredValue):
+  def __init__(self, tup): super().__init__(tup, tup._yaml_point_)
+  def _gcl_explanation_(self):
+    return f'Preprocessing Yamlet tuple literal'
+  def _gcl_evaluate_(self, value, ectx):
+    value._gcl_preprocess_(ectx)
+    return value
+  def keys(self): return self._gcl_construct_.keys()
+  def _gcl_noresolve_items_(self):
+    return self._gcl_construct_._gcl_noresolve_items_()
 
 
-def _BuiltinFuncsMapper():
-  def cond(condition, if_true, if_false):
-    return if_true if condition else if_false
-  return {
-    'cond': cond,
-  }
-_BUILTIN_FUNCS = _BuiltinFuncsMapper()
+'''▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+░▒▓██████████████████████████████████████████████████████████████████████████▓▒░
+░▒▓█▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀█▓▒░
+░▒▓█ Preprocessing Directives:  Execution of Yamlet-specific preprocessors. █▓▒░
+░▒▓█▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄█▓▒░
+░▒▓██████████████████████████████████████████████████████████████████████████▓▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+  ░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒'''
 
+
+class PreprocessingDirective():
+  def __init__(self, data, yaml_point):
+    self._gcl_construct_ = data
+    self._yaml_point_ = yaml_point
+  def _gcl_clone_preprocessor_(self):
+    raise NotImplementedError(
+        f'Internal error: clone() not implemented in {type(self).__name__}')
+  def _gcl_preprocess_(self, ectx):
+    raise NotImplementedError(
+        f'Internal error: preprocess() not implemented in {type(self).__name__}'
+    )
+
+
+class YamletIfStatement(PreprocessingDirective): pass
+class YamletElifStatement(PreprocessingDirective): pass
+class YamletElseStatement(PreprocessingDirective): pass
+class YamletIfElseLadder(PreprocessingDirective):
+  def __init__(self, k, v):
+    self.if_statement = (k, v)
+    self.else_statement = None
+    self.elif_statements = []
+    self.all_vars = set(v.keys())
+
+  def PutElif(self, k, v):
+    self.elif_statements.append((k, v))
+    self.all_vars |= v.keys()
+
+  def PutElse(self, k, v):
+    self.else_statement = (k, v)
+    self.all_vars |= v.keys()
+
+  def Finalize(self, filtered_pairs, cErr):
+    size = 2 + len(self.elif_statements)
+    arrays = {k: [_undefined] * size for k in self.all_vars}
+    ladder_point = self.if_statement[0]._yaml_point_
+    for k, v in self.if_statement[1]._gcl_noresolve_items_():
+      arrays[k][0] = v
+    for i, elif_statement in enumerate(self.elif_statements):
+      for k, v in elif_statement[1]._gcl_noresolve_items_():
+        arrays[k][i + 1] = v
+    if self.else_statement:
+      for k, v in self.else_statement[1]._gcl_noresolve_items_():
+        arrays[k][-1] = v
+    for k, v in arrays.items():
+      v0 = IfLadderItem((self, v), ladder_point)
+      v1 = filtered_pairs.setdefault(k, v0)
+      if v0 is not v1:
+        filtered_pairs[k] = FlatCompositor([v1, v0], ladder_point, varname=k)
+    expr_points = [self.if_statement[0]] + [e[0] for e in self.elif_statements]
+    self.cond_dvals = [ExpressionToEvaluate(ep._gcl_construct_, ep._yaml_point_)
+                       for ep in expr_points]
+    self.index = IfLadderTableIndex(self, ladder_point)
+
+  def _gcl_preprocess_(self, ectx):
+    try: self.index._gcl_resolve_(ectx)
+    except Exception: pass
+
+  def _gcl_clone_preprocessor_(self):
+    other = copy.copy(self)
+    other.cond_dvals = [dv._gcl_clone_deferred_() for dv in self.cond_dvals]
+    other.index = self.index._gcl_clone_deferred_()
+    other.index._gcl_construct_ = self
+    return other
+
+
+def _DebugPrint(*args, **kwargs): pass #print(*args, **kwargs)
+def _GclWarning(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)
+
+
+def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point):
+  filtered_pairs = {}
+  preprocessors = {}
+  if_directive = None
+  cErr = lambda msg, v: ConstructorError(None, None, msg, v._yaml_point_.start)
+  notDict = lambda v: (
+      not isinstance(v, GclDict) and not isinstance(v, PreprocessingTuple))
+  notDictErr = lambda k, v: cErr(
+      'Yamlet preprocessor conditionals should be mappings. '
+      f'For individual values, use `!expr cond(cond, t, f)`.\nGot: {v}', k)
+  def terminateIfDirective():
+    nonlocal if_directive, preprocessors
+    if if_directive:
+      if_directive.Finalize(filtered_pairs, cErr)
+      preprocessors[id(if_directive)] = if_directive
+      if_directive = None
+  for k, v in mapping_pairs:
+    if isinstance(k, PreprocessingDirective):
+      if isinstance(k, YamletIfStatement):
+        if notDict(v): raise notDictErr(k, v)
+        terminateIfDirective()
+        if_directive = YamletIfElseLadder(k, v)
+      elif isinstance(k, YamletElifStatement):
+        if notDict(v): raise notDictErr(k, v)
+        if not if_directive:
+          raise cErr('`!elif` directive is not paired to an `!if` directive', k)
+        if_directive.PutElif(k, v)
+      elif isinstance(k, YamletElseStatement):
+        if notDict(v): raise notDictErr(k, v)
+        if not if_directive:
+          raise cErr('`!else` directive is not paired to an `!if` directive', k)
+        if_directive.PutElse(k, v)
+        terminateIfDirective()
+    elif isinstance(k, DeferredValue):
+      terminateIfDirective()
+      # XXX: Fringe use-case would be to allow a kind of "!const" tag to
+      # appear here so that local evaluations can be used as keys.
+      raise cErr('Yamlet keys from YAML mappings must be constant', k)
+    else:
+      terminateIfDirective()
+      if k in filtered_pairs:
+        raise cErr(f'Duplicate tuple key `{k}`: '
+                   'this is defined to be an error in Yamlet 0.0')
+      filtered_pairs[k] = v
+  terminateIfDirective()
+  res = GclDict(filtered_pairs,
+                gcl_parent=None, gcl_super=None, gcl_opts=gcl_opts,
+                preprocessors=preprocessors, yaml_point=yaml_point)
+  return res  # PreprocessingTuple(res)
+
+
+'''▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+░▒▓██▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀██▓▒░
+░▒▓██  DynamicScopeLoader:  The user interface to Yamlet.                  ██▓▒░
+░▒▓██▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄██▓▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+  ░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒'''
+
+# TODO: Scrub this section; reconcile with the loader class above.
+# We really don't need closure-style member protection, here; if a user wants
+# to fuck up our internals, that's on them.
 
 def DynamicScopeLoader(opts=YamletOptions()):
   loaded_modules = {}
@@ -488,7 +705,7 @@ def DynamicScopeLoader(opts=YamletOptions()):
     return res
 
   def ConstructGclDict(loader, node):
-    return PreprocessingTuple.FromMapping(
+    return ProcessYamlPairs(
         loader.construct_pairs(node), gcl_opts=opts,
         yaml_point=YamlPoint(start=node.start_mark, end=node.end_mark))
 
@@ -535,9 +752,9 @@ def DynamicScopeLoader(opts=YamletOptions()):
 
   def ProcessYamlGcl(ygcl):
     tup = y.load(ygcl)
-    if isinstance(tup, DeferredValue):
-      tup = tup._gcl_resolve_(_EvalContext(None, opts, tup._yaml_point_,
-                              'Evaluating preprocessors in Yamlet document.'))
+    ectx = _EvalContext(None, opts, tup._yaml_point_,
+                        'Evaluating preprocessors in Yamlet document.')
+    while isinstance(tup, DeferredValue): tup = tup._gcl_resolve_(ectx)
     _RecursiveUpdateParents(tup, None, opts)
     return tup
 
@@ -546,6 +763,17 @@ def DynamicScopeLoader(opts=YamletOptions()):
       with open(filename) as fn: return self.loads(fn)
     def loads(self, yaml_gcl): return ProcessYamlGcl(yaml_gcl)
   return Result()
+
+
+'''▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+░▒▓██████████████████████████████████████████████████████████████████████████▓▒░
+░▒▓██▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀██▓▒░
+░▒▓██  Expression Parsing:  Hammering GCL constructs into Python.          ██▓▒░
+░▒▓██▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄██▓▒░
+░▒▓██████████████████████████████████████████████████████████████████████████▓▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+  ░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒'''
 
 
 def _TokensCollide(t1, t2):
@@ -584,7 +812,8 @@ def _ParseIntoChunks(expr):
     try:
       return ast.parse(expstr, mode='eval')
     except Exception as e:
-      raise SyntaxError(f'Failed to parse ast from `{expstr}` when processing these chunks: {token_blocks}') from e
+      raise SyntaxError(f'Failed to parse ast from `{expstr}`'
+                        f' when processing these chunks: {token_blocks}') from e
   _DebugPrint(f'Chunked as {token_blocks}')
   return [Parse(tokens) for tokens in token_blocks]
 
@@ -644,12 +873,24 @@ def _CompositeYamlTupleList(tuples, ectx):
   return _CompositeGclTuples(tuples, ectx)
 
 
-def _GclExprEval(expr, ectx):
-  _DebugPrint(f'Evaluate: {expr}')
-  chunks = _ParseIntoChunks(expr)
-  vals = [_EvalGclAst(chunk, ectx) for chunk in chunks]
-  if len(vals) == 1 and not isinstance(vals[0], GclDict): return vals[0]
-  return _CompositeGclTuples(vals, ectx)
+'''▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+░▒▓██████████████████████████████████████████████████████████████████████████▓▒░
+░▒▓██▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀██▓▒░
+░▒▓██  Expression Evaluation:  Duct-taping Python expressions onto YAML.   ██▓▒░
+░▒▓██▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄██▓▒░
+░▒▓██████████████████████████████████████████████████████████████████████████▓▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+  ░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒'''
+
+def _BuiltinFuncsMapper():
+  def cond(condition, if_true, if_false):
+    return if_true if condition else if_false
+  return {
+    'cond': cond,
+  }
+_BUILTIN_FUNCS = _BuiltinFuncsMapper()
+
 
 _BUILTIN_NAMES = {
   'up': lambda ectx: ectx.scope._gcl_parent_ or ectx.Raise(ValueError,
@@ -670,6 +911,14 @@ def _GclNameLookup(name, ectx):
   mnv = ectx.opts.missing_name_value
   if mnv is not YamletOptions.Error: return mnv
   ectx.Raise(NameError, f'There is no variable called `{name}` in this scope.')
+
+
+def _GclExprEval(expr, ectx):
+  _DebugPrint(f'Evaluate: {expr}')
+  chunks = _ParseIntoChunks(expr)
+  vals = [_EvalGclAst(chunk, ectx) for chunk in chunks]
+  if len(vals) == 1 and not isinstance(vals[0], GclDict): return vals[0]
+  return _CompositeGclTuples(vals, ectx)
 
 
 def _EvalGclAst(et, ectx):
@@ -700,7 +949,6 @@ def _EvalGclAst(et, ectx):
         match type(op):
           case ast.Eq:
             if l != r: return False
-            print(f'True: {l} == {r}')
           case ast.NotEq:
             if l == r: return False
           case ast.Lt:
@@ -737,6 +985,8 @@ def _EvalGclAst(et, ectx):
       fun_args = [_EvalGclAst(arg, ectx) for arg in et.args]
       fun_kwargs = {kw.arg: _EvalGclAst(kw.value, ectx) for kw in et.keywords}
       return fun(*fun_args, **fun_kwargs)
+    case ast.List:
+      return [ev(x) for x in et.elts]
     case ast.Dict:
       def EvalKey(k):
         if isinstance(k, ast.Name): return k.id
