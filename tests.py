@@ -188,7 +188,7 @@ class TestTupleCompositing(unittest.TestCase):
     '''
     loader = yamlet.DynamicScopeLoader()
     y = loader.loads(YAMLET)
-    with AssertRaisesCleanException(ValueError):
+    with AssertRaisesCleanException(self, ValueError):
       val = y['t1']['sub']['exp']
       self.fail(f'Did not throw an exception; got `{val}`')
 
@@ -222,6 +222,18 @@ class TestInheritance(unittest.TestCase):
     loader = yamlet.DynamicScopeLoader()
     y = loader.loads(YAMLET)
     self.assertEqual(y['t2']['sub']['counting'], 'one two three four')
+
+  def test_invalid_up_super_usage(self):
+    YAMLET = '''# Yamlet
+    t:
+      a: !expr up.x
+      x: an actual value
+    '''
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+    with AssertRaisesCleanException(self, KeyError):
+        val = y['t']['a']
+        self.fail(f'Did not throw an exception; got `{val}`')
 
 
 class TestStringMechanics(unittest.TestCase):
@@ -341,6 +353,48 @@ class TestConditionals(unittest.TestCase):
     self.assertEqual(set(y['t3'].keys()), {'animal', 'environment'})
     self.assertEqual(set(y['t4'].keys()), {'animal', 'recommendation'})
 
+  def test_if_statement_templating(self):
+    YAMLET = '''# Yamlet
+    t0:
+      !if animal == 'fish':
+        environment: water
+      !elif animal == 'dog':
+        attention: pats
+        toys: !expr ([favorite_toy])
+      !elif animal == 'cat':
+        diet: meat
+      !else :
+        recommendation: specialist
+    t1: !expr |
+        t0 { animal: 'cat' }
+    t2: !composite
+      - t0
+      - animal: dog
+        favorite_toy: squeaky ball
+        action: !expr attention
+    t3: !expr |
+        t0 { animal: 'fish' }
+    t4: !expr |
+        t0 { animal: 'squirrel' }
+    '''
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+    self.assertEqual(y['t1'].evaluate_fully(), {
+        'animal': 'cat',
+        'diet': 'meat'})
+    self.assertEqual(y['t2'].evaluate_fully(), {
+        'animal': 'dog',
+        'action': 'pats',
+        'attention': 'pats',
+        'favorite_toy': 'squeaky ball',
+        'toys': ['squeaky ball']})
+    self.assertEqual(y['t3'].evaluate_fully(), {
+        'animal': 'fish',
+        'environment': 'water'})
+    self.assertEqual(y['t4'].evaluate_fully(), {
+        'animal': 'squirrel',
+        'recommendation': 'specialist'})
+
   def test_if_statements(self):
     YAMLET = '''# Yamlet
     !if (1 + 1 == 2):
@@ -399,8 +453,173 @@ class TestConditionals(unittest.TestCase):
     self.assertEqual(y['t'].keys(), {'a', 'b'})
     self.assertFalse('crap' in y['t'])
 
+  def test_nested_if_statements(self):
+    # Another test from GPT, but this one, I asked for specifically. 😁
+    YAMLET = '''# Yamlet
+    t1:
+      !if outer == 'A':
+        !if inner == 'X':
+          result: 'AX'
+        !elif inner == 'Y':
+          result: 'AY'
+        !else :
+          result: 'A?'
+      !elif outer == 'B':
+        !if inner == 'X':
+          result: 'BX'
+        !elif inner == 'Y':
+          result: 'BY'
+        !else :
+          result: 'B?'
+      !else :
+        result: 'Unknown'
+    t2: !expr |
+        t1 { outer: 'A', inner: 'X' }
+    t3: !expr |
+        t1 { outer: 'A', inner: 'Z' }
+    t4: !expr |
+        t1 { outer: 'B', inner: 'Y' }
+    t5: !expr |
+        t1 { outer: 'B', inner: 'Z' }
+    t6: !expr |
+        t1 { outer: 'C', inner: 'X' }
+    '''
+
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+
+    # Check for various nested conditions
+    self.assertEqual(y['t2']['result'], 'AX')  # outer == 'A', inner == 'X'
+    self.assertEqual(y['t3']['result'], 'A?')  # outer == 'A', inner not matched
+    self.assertEqual(y['t4']['result'], 'BY')  # outer == 'B', inner == 'Y'
+    self.assertEqual(y['t5']['result'], 'B?')  # outer == 'B', inner not matched
+    self.assertEqual(y['t6']['result'], 'Unknown')  # outer not matched
+
+  def test_double_nested_if_statements(self):
+    YAMLET = '''# Yamlet
+    tp:
+      !if first == 'A':
+        !if middle == 'X':
+          !if last == 1:
+            result: AX1
+          !elif last == 2:
+            result: AX2
+          !else :
+            result: AX?
+        !elif middle == 'Y':
+          !if last == 1:
+            result: AY1
+          !elif last == 2:
+            result: AY2
+          !else :
+            result: AY?
+        !else :
+          result: 'A??'
+      !elif first == 'B':
+        !if middle == 'X':
+          !if last == 1:
+            result: BX1
+          !elif last == 2:
+            result: BX2
+          !else :
+            result: BX?
+        !elif middle == 'Y':
+          !if last == 1:
+            result: BY1
+          !elif last == 2:
+            result: BY2
+          !else :
+            result: BY?
+        !else :
+          result: 'B??'
+      !else :
+        result: '???'
+    ax1: !composite [tp, {first: 'A', middle: 'X', last: 1}]
+    ax2: !composite [tp, {first: 'A', middle: 'X', last: 2}]
+    ax3: !composite [tp, {first: 'A', middle: 'X', last: 3}]
+    ay1: !composite [tp, {first: 'A', middle: 'Y', last: 1}]
+    ay2: !composite [tp, {first: 'A', middle: 'Y', last: 2}]
+    ay3: !composite [tp, {first: 'A', middle: 'Y', last: 3}]
+    az1: !composite [tp, {first: 'A', middle: 'Z', last: 1}]
+    bx1: !composite [tp, {first: 'B', middle: 'X', last: 1}]
+    bx2: !composite [tp, {first: 'B', middle: 'X', last: 2}]
+    bx3: !composite [tp, {first: 'B', middle: 'X', last: 3}]
+    by1: !composite [tp, {first: 'B', middle: 'Y', last: 1}]
+    by2: !composite [tp, {first: 'B', middle: 'Y', last: 2}]
+    by3: !composite [tp, {first: 'B', middle: 'Y', last: 3}]
+    bz1: !composite [tp, {first: 'B', middle: 'Z', last: 1}]
+    cx1: !composite [tp, {first: 'C', middle: 'X', last: 1}]
+    '''
+
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+
+    # Check for various nested conditions
+    self.assertEqual(y['ax1']['result'], 'AX1')
+    self.assertEqual(y['ax2']['result'], 'AX2')
+    self.assertEqual(y['ax3']['result'], 'AX?')
+    self.assertEqual(y['ay1']['result'], 'AY1')
+    self.assertEqual(y['ay2']['result'], 'AY2')
+    self.assertEqual(y['ay3']['result'], 'AY?')
+    self.assertEqual(y['az1']['result'], 'A??')
+    self.assertEqual(y['bx1']['result'], 'BX1')
+    self.assertEqual(y['bx2']['result'], 'BX2')
+    self.assertEqual(y['bx3']['result'], 'BX?')
+    self.assertEqual(y['by1']['result'], 'BY1')
+    self.assertEqual(y['by2']['result'], 'BY2')
+    self.assertEqual(y['by3']['result'], 'BY?')
+    self.assertEqual(y['bz1']['result'], 'B??')
+    self.assertEqual(y['cx1']['result'], '???')
+
+  def test_fuzzy_if(self):
+    YAMLET = '''# Yamlet
+    !if fuzzy == 'rodent':
+      food: pellet
+      !if fuzzy == 'hamster':
+        habitat: tubes
+    !elif fuzzy == 'fish':
+      food: flake
+    !else :
+      food: kibble
+    '''
+    fuzzy = FuzzyAnimalComparator()
+    opts = yamlet.YamletOptions(globals={'fuzzy': fuzzy})
+    loader = yamlet.DynamicScopeLoader(opts)
+
+    fuzzy.animal = 'hamster'
+    y = loader.loads(YAMLET)
+    self.assertEqual(y.keys(), {'food', 'habitat'})
+    self.assertEqual(y['food'], 'pellet')
+    self.assertEqual(y['habitat'], 'tubes')
+
+    fuzzy.animal = 'betta'
+    y = loader.loads(YAMLET)
+    self.assertEqual(y.keys(), {'food'})
+    self.assertEqual(y['food'], 'flake')
+
+    fuzzy.animal = 'dog'
+    y = loader.loads(YAMLET)
+    self.assertEqual(y.keys(), {'food'})
+    self.assertEqual(y['food'], 'kibble')
+
+    fuzzy.animal = 'rat'
+    y = loader.loads(YAMLET)
+    self.assertEqual(y.keys(), {'food'})
+    self.assertEqual(y['food'], 'pellet')
+
+
+class FuzzyAnimalComparator:
+  KINDS = {'hamster': 'rodent', 'rat': 'rodent', 'betta': 'fish', 'dog': 'dog'}
+  def __init__(self, animal=None): self.animal = animal
+  def __eq__(self, other):
+    oa = other.animal if isinstance(other, FuzzyAnimalComparator) else other
+    return self.animal == oa or (
+        self.KINDS.get(self.animal) == oa or self.KINDS.get(oa) == self.animal)
+
+
 class AssertRaisesCleanException:
-  def __init__(self, exc_tp, min_context=15, max_context=30):
+  def __init__(self, tester, exc_tp, min_context=15, max_context=30):
+    self.tester = tester
     self.exc_tp = exc_tp
     self.ex = None
     self.val = None
@@ -412,7 +631,8 @@ class AssertRaisesCleanException:
 
   def __exit__(self, exc_type, exc_value, exc_traceback):
     if exc_type is None:  # No exception was raised
-      raise AssertionError('Did not throw an exception.')
+      self.tester.fail('Did not throw an exception.')
+      return False
 
     if not issubclass(exc_type, self.exc_tp):
       # Let other exceptions pass through
@@ -425,15 +645,19 @@ class AssertRaisesCleanException:
     exlines = ex.splitlines()
     fex = '  > ' + '\n  > '.join('\n'.join(exlines).splitlines())
     if len(tb) >= 3:
-      raise AssertionError(f'Stack trace is ugly:\n{fex}')
+      raise AssertionError(f'Stack trace is ugly:\n{fex}\n'
+                           f'The above exception should have had {3} '
+                           f'calls on the stack, but had {len(tb)}.') from None
     if len(exlines) <= self.min_context:
       raise AssertionError(f'Yamlet trace is too small:\n{fex}\n'
                            f'The above exception should have been at least '
-                           f'{self.min_context} lines, but was {len(exlines)}.')
+                           f'{self.min_context} lines, but was {len(exlines)}.'
+      ) from None
     if len(exlines) >= self.max_context:
       raise AssertionError(f'Yamlet trace is too large:\n{fex}\n'
                            f'The above exception should have been at most '
-                           f'{self.max_context} lines, but was {len(exlines)}.')
+                           f'{self.max_context} lines, but was {len(exlines)}.'
+      ) from None
 
     # Suppress the exception (so it won't propagate)
     return True
@@ -447,7 +671,7 @@ class TestRecursion(unittest.TestCase):
     '''
     loader = yamlet.DynamicScopeLoader()
     y = loader.loads(YAMLET)
-    with AssertRaisesCleanException(RecursionError):
+    with AssertRaisesCleanException(self, RecursionError):
       val = y['recursive']['a']
       self.fail(f'Did not throw an exception; got `{val}`')
 
@@ -465,9 +689,86 @@ class TestRecursion(unittest.TestCase):
     '''
     loader = yamlet.DynamicScopeLoader()
     y = loader.loads(YAMLET)
-    with AssertRaisesCleanException(RecursionError, max_context=40):
+    with AssertRaisesCleanException(self, RecursionError, max_context=40):
       val = y['child']['parentvalue']
       self.fail(f'Did not throw an exception; got `{val}`')
+
+
+class GptsTestIdeas(unittest.TestCase):
+  def test_chained_up_super(self):
+    YAMLET = '''# Yamlet
+    t1:
+      a: base
+      sub:
+        a: level1
+        subsub:
+          a: level2
+    t2: !composite
+      - t1
+      - sub:
+          subsub:
+            a: override
+            test: !fmt '{up.up.super.a} {up.a} {super.a} {a}'
+    '''
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+    self.assertEqual(y['t2']['sub']['subsub']['test'], 'base level1 level2 override')
+
+  def test_nested_nullification(self):
+    YAMLET = '''# Yamlet
+    t1:
+      a: apple
+      b: boy
+      sub:
+        c: cat
+        d: dog
+    t2:
+      a: !null
+      sub:
+        d: !null
+    t3: !expr t1 t2
+    '''
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+    self.assertEqual(y['t3'], {'b': 'boy', 'sub': {'c': 'cat'}})
+
+  def test_nested_super_override(self):
+    YAMLET = '''# Yamlet
+    t1:
+      a: original
+      sub:
+        a: intermediate
+        subsub:
+          a: final
+          result: !fmt '{up.a} {up.up.a} {a}'
+    '''
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+    self.assertEqual(y['t1']['sub']['subsub']['result'], 'intermediate original final')
+
+  def test_invalid_up_usage(self):
+    YAMLET = '''# Yamlet
+    a: !expr up.a
+    '''
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+    with AssertRaisesCleanException(self, ValueError):
+        val = y['a']
+        self.fail(f'Did not throw an exception; got `{val}`')
+
+  def test_invalid_super_usage(self):
+    YAMLET = '''# Yamlet
+    t1:
+      a: some value
+      sub:
+        a: !expr super.a
+    '''
+    loader = yamlet.DynamicScopeLoader()
+    y = loader.loads(YAMLET)
+    with AssertRaisesCleanException(self, ValueError):
+        val = y['t1']['sub']['a']
+        self.fail(f'Did not throw an exception; got `{val}`')
+
 
 
 if __name__ == '__main__':

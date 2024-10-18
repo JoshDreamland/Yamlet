@@ -1,6 +1,7 @@
 import ast
 import copy
 import io
+import keyword
 import pathlib
 import ruamel.yaml
 import sys
@@ -8,18 +9,17 @@ import token
 import tokenize
 
 ConstructorError = ruamel.yaml.constructor.ConstructorError
-
-
 class YamletBaseException(Exception): pass
 
 
 class YamletOptions:
   Error = ['error']
   def __init__(self, import_resolver=None, missing_name_value=Error,
-               functions={}):
+               functions={}, globals={}):
     self.import_resolver = import_resolver or str
     self.missing_name_value = missing_name_value
     self.functions = functions
+    self.globals = globals
 
 
 class Cloneable:
@@ -166,6 +166,17 @@ class GclDict(dict, Compositable):
       res.__setitem__(k, v)
     return res
 
+  def evaluate_fully(self, ectx=None):
+    ectx = (
+        ectx.Branch('Fully evaluating nested tuple', self._yaml_point_, self)
+        if ectx else _EvalContext(self, self._gcl_opts_, self._yaml_point_,
+                                  name='Fully evaluating Yamlet tuple'))
+    def ev(v):
+      while isinstance(v, DeferredValue): v = v._gcl_resolve_(ectx)
+      if isinstance(v, GclDict): v = v.evaluate_fully(ectx)
+      return v
+    return {k: ev(v) for k, v in self._gcl_noresolve_items_()}
+
   def _gcl_noresolve_values_(self): return super().values()
   def _gcl_noresolve_items_(self): return super().items()
   def _gcl_noresolve_get_(self, k): return super().__getitem__(k)
@@ -224,6 +235,8 @@ def exceptions(bc):
     def __init__(self, message, details):
       super().__init__(message)
       self.details = details
+      self.traced_message = message
+    def __str__(self): return self.traced_message
   return YamletException
 
 
@@ -459,20 +472,22 @@ class IfLadderItem(DeferredValue):
   def _gcl_explanation_(self):
     return f'Evaluating item in if-else ladder'
 
-  def _gcl_ladder_table_lookup_(self, value, ectx, recompute_cache):
+  def _gcl_ladder_table_lookup_(self, value, ectx, index_failures):
     if self._gcl_cache_table_entry_ is _empty:
       ladder, table = value
       ladder = ectx.scope._gcl_preprocessors_.get(id(ladder))
       ectx.Assert(ladder,
                   'Internal error: The preprocessor `!if` directive from which '
                   'this value was assigned was not inherited...')
-      index = ladder.index._gcl_cache_
-      if index is _empty:
-        if not recompute_cache: return external  # And do NOT cache!
+      index = _empty
+      try: index = ladder.index._gcl_resolve_(ectx)
+      except Exception as e:
+        if index_failures: raise
+        return external  # And do NOT cache!
         # We will retry this value later if a user requests it,
         # which would be an actual error case.
-        index = ladder.index._gcl_resolve_(ectx)
-      self._gcl_cache_table_entry_ = table[index]
+      # self._gcl_cache_table_entry_ = 
+      return table[index]
     return self._gcl_cache_table_entry_
 
   def _gcl_evaluate_(self, value, ectx):
@@ -480,6 +495,7 @@ class IfLadderItem(DeferredValue):
     while isinstance(result, DeferredValue): result = result._gcl_resolve_(ectx)
     if result is _undefined: return null
     return result
+  def _gcl_resolve_(self, ectx): return self._gcl_evaluate_(self._gcl_construct_, ectx)
 
   def _gcl_is_null_(self, ectx):
     result = self._gcl_ladder_table_lookup_(self._gcl_construct_, ectx, False)
@@ -493,6 +509,7 @@ class FlatCompositor(DeferredValue):
     self._gcl_varname_ = varname
   def _gcl_explanation_(self):
     return f'Compositing values given for `{self._gcl_varname_}`'
+  def _gcl_resolve_(self, ectx): return self._gcl_evaluate_(self._gcl_construct_, ectx)
 
   def _gcl_evaluate_(self, value, ectx):
     active_composite = []
@@ -648,9 +665,15 @@ class YamletIfElseLadder(PreprocessingDirective):
                        for ep in expr_points]
     self.index = IfLadderTableIndex(self, ladder_point)
 
-  def _gcl_preprocess_(self, ectx):
-    try: self.index._gcl_resolve_(ectx)
-    except Exception: pass
+  def AddPreprocessors(self, preprocessors):
+    preprocessors[id(self)] = self
+    preprocessors |= self.if_statement[1]._gcl_preprocessors_
+    for elif_statement in self.elif_statements:
+      preprocessors |= elif_statement[1]._gcl_preprocessors_
+    if self.else_statement:
+      preprocessors |= self.else_statement[1]._gcl_preprocessors_
+
+  def _gcl_preprocess_(self, ectx): pass
 
   def yamlet_clone(self, new_scope):
     other = copy.copy(self)
@@ -678,7 +701,7 @@ def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point):
     nonlocal if_directive, preprocessors
     if if_directive:
       if_directive.Finalize(filtered_pairs, cErr)
-      preprocessors[id(if_directive)] = if_directive
+      if_directive.AddPreprocessors(preprocessors)
       if_directive = None
   for k, v in mapping_pairs:
     if isinstance(k, PreprocessingDirective):
@@ -840,6 +863,8 @@ def _TokensCollide(t1, t2):
   colliding_tokens = {token.NAME, token.NUMBER, token.STRING, token.OP}
   if t1.type not in colliding_tokens or t2.type not in colliding_tokens:
     return False
+  if t1.type == token.NAME and keyword.iskeyword(t1.string): return False
+  if t2.type == token.NAME and keyword.iskeyword(t2.string): return False
   if t1.type == token.STRING and t2.type == token.STRING: return False
   if t1.type == token.NAME and t2.type == token.OP:  return t2.string == '{'
   if t2.type == token.OP and t2.string not in '([{': return False
@@ -960,6 +985,8 @@ _BUILTIN_NAMES = {
 _BUILTIN_VARS = {
   'external': external, 'null': null
 }
+
+
 def _GclNameLookup(name, ectx):
   if name in _BUILTIN_NAMES: return _BUILTIN_NAMES[name](ectx)
   if name in _BUILTIN_VARS: return _BUILTIN_VARS[name]
@@ -971,6 +998,7 @@ def _GclNameLookup(name, ectx):
   if ectx.scope._gcl_parent_:
     with ectx.Scope(ectx.scope._gcl_parent_):
       return _GclNameLookup(name, ectx)
+  if name in ectx.opts.globals: return ectx.opts.globals[name]
   mnv = ectx.opts.missing_name_value
   if mnv is not YamletOptions.Error: return mnv
   ectx.Raise(NameError, f'There is no variable called `{name}` in this scope.')
@@ -998,7 +1026,9 @@ def _EvalGclAst(et, ectx):
       val = ev(et.value)
       if et.attr in _BUILTIN_NAMES:
         with ectx.Scope(val): return _BUILTIN_NAMES[et.attr](ectx)
-      if isinstance(val, GclDict): return val._gcl_traceable_get_(et.attr, ectx)
+      if isinstance(val, GclDict):
+        try: return val._gcl_traceable_get_(et.attr, ectx)
+        except KeyError: ectx.Raise(KeyError, f'No {et.attr} in this scope.')
       return val[et.attr]
     case ast.BinOp:
       l, r = ev(et.left), ev(et.right)
@@ -1031,9 +1061,23 @@ def _EvalGclAst(et, ectx):
           case ast.NotIn:
             if l in r: return False
           case _: ectx.Raise(NotImplementedError,
-                             f'Unsupported comparison operator `{op}`.')
+                             f'UnKnown comparison operator `{op}`.')
         l = r
       return True
+    case ast.BoolOp:
+      v = None
+      match type(et.op):
+        case ast.And:
+          for v in et.values:
+            v = ev(v)
+            if not v: return v
+        case ast.Or:
+          for v in et.values:
+            v = ev(v)
+            if v: return v
+        case _: ectx.Raise(NotImplementedError,
+                           f'Unknown boolean operator `{op}`.')
+      return v
     case ast.Call:
       fun, fun_name = None, None
       if isinstance(et.func, ast.Name):
