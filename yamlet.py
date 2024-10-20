@@ -14,12 +14,18 @@ class YamletBaseException(Exception): pass
 
 class YamletOptions:
   Error = ['error']
+
+  CACHE_VALUES = 1
+  CACHE_NOTHING = 2
+  CACHE_DEBUG = 3
+
   def __init__(self, import_resolver=None, missing_name_value=Error,
-               functions={}, globals={}):
+               functions={}, globals={}, caching=CACHE_VALUES):
     self.import_resolver = import_resolver or str
     self.missing_name_value = missing_name_value
     self.functions = functions
     self.globals = globals
+    self.caching = caching
 
 
 class Cloneable:
@@ -151,7 +157,7 @@ class GclDict(dict, Compositable):
       v._gcl_preprocess_(ectx)
     erased = set()
     for k, v in self._gcl_noresolve_items_():
-      if isinstance(v, DeferredValue) and v._gcl_is_null_(ectx):
+      if isinstance(v, DeferredValue) and v._gcl_is_undefined_(ectx):
         erased.add(k)
     for k in erased: super().pop(k)
 
@@ -387,18 +393,29 @@ class DeferredValue(Cloneable):
     self._gcl_cache_ = _empty
     self._yaml_point_ = yaml_point
 
+  def __eq__(self, other):
+    return (isinstance(other, DeferredValue) and
+            other._gcl_construct_ == self._gcl_construct_)
+
   def _gcl_resolve_(self, ectx):
     if self._gcl_cache_ is _empty:
       self._gcl_provenance_ = ectx.BranchForDeferredEval(
           self, self._gcl_explanation_())
-      self._gcl_cache_ = self._gcl_evaluate_(
-          self._gcl_construct_, self._gcl_provenance_)
+      res = self._gcl_evaluate_(self._gcl_construct_, self._gcl_provenance_)
+      if ectx.opts.caching == YamletOptions.CACHE_NOTHING: return res
+      if ectx.opts.caching == YamletOptions.CACHE_DEBUG:
+        if getattr(self, '_gcl_cache_debug_', _empty) is not _empty:
+          assert res == self._gcl_cache_debug_, ('Internal error: Cache bug! '
+              f'Cached value `{self._gcl_cache_debug_}` is not `{res}`!')
+        self._gcl_cache_debug_ = res
+        return res
+      self._gcl_cache_ = res
     return self._gcl_cache_
 
   def yamlet_clone(self, new_scope):
     return type(self)(self._gcl_construct_, self._yaml_point_)
 
-  def _gcl_is_null_(self, ectx): return False
+  def _gcl_is_undefined_(self, ectx): return False
 
   def __str__(self):
     return (f'<Unevaluated: {self._gcl_construct_}>' if not self._gcl_cache_
@@ -467,40 +484,32 @@ class IfLadderTableIndex(DeferredValue):
 class IfLadderItem(DeferredValue):
   def __init__(self, *args, **kwargs):
     super().__init__(*args, **kwargs)
-    self._gcl_cache_table_entry_ = _empty
 
   def _gcl_explanation_(self):
     return f'Evaluating item in if-else ladder'
 
-  def _gcl_ladder_table_lookup_(self, value, ectx, index_failures):
-    if self._gcl_cache_table_entry_ is _empty:
-      ladder, table = value
-      ladder = ectx.scope._gcl_preprocessors_.get(id(ladder))
-      ectx.Assert(ladder,
-                  'Internal error: The preprocessor `!if` directive from which '
-                  'this value was assigned was not inherited...')
-      index = _empty
-      try: index = ladder.index._gcl_resolve_(ectx)
-      except Exception as e:
-        if index_failures: raise
-        return external  # And do NOT cache!
-        # We will retry this value later if a user requests it,
-        # which would be an actual error case.
-      # self._gcl_cache_table_entry_ = 
-      return table[index]
-    return self._gcl_cache_table_entry_
-
   def _gcl_evaluate_(self, value, ectx):
-    result = self._gcl_ladder_table_lookup_(value, ectx, True)
+    ladder, table = value
+    ladder = ectx.scope._gcl_preprocessors_.get(id(ladder))
+    ectx.Assert(ladder,
+                'Internal error: The preprocessor `!if` directive from which '
+                'this value was assigned was not inherited...')
+    index = ladder.index._gcl_resolve_(ectx)
+    result = table[index]
     while isinstance(result, DeferredValue): result = result._gcl_resolve_(ectx)
-    if result is _undefined: return null
     return result
-  def _gcl_resolve_(self, ectx): return self._gcl_evaluate_(self._gcl_construct_, ectx)
 
-  def _gcl_is_null_(self, ectx):
-    result = self._gcl_ladder_table_lookup_(self._gcl_construct_, ectx, False)
-    if isinstance(result, DeferredValue): return result._gcl_is_null_(ectx)
-    return result is null or result is _undefined
+  def yamlet_clone(self, new_scope):
+    return IfLadderItem((self._gcl_construct_[0], [
+        e.yamlet_clone(new_scope) if isinstance(e, Cloneable) else e
+        for i, e in enumerate(self._gcl_construct_[1])]), self._yaml_point_)
+    return res
+
+  def _gcl_is_undefined_(self, ectx):
+    try: result = self._gcl_resolve_(ectx)
+    except Exception as e: return False  # Keep and let user discover the error.
+    if isinstance(result, DeferredValue): return result._gcl_is_undefined_(ectx)
+    return result is _undefined
 
 
 class FlatCompositor(DeferredValue):
@@ -509,7 +518,6 @@ class FlatCompositor(DeferredValue):
     self._gcl_varname_ = varname
   def _gcl_explanation_(self):
     return f'Compositing values given for `{self._gcl_varname_}`'
-  def _gcl_resolve_(self, ectx): return self._gcl_evaluate_(self._gcl_construct_, ectx)
 
   def _gcl_evaluate_(self, value, ectx):
     active_composite = []
@@ -527,10 +535,10 @@ class FlatCompositor(DeferredValue):
                              f'`{self._gcl_varname_}`.')
     return _CompositeGclTuples(active_composite, ectx)
 
-  def _gcl_is_null_(self, ectx):
+  def _gcl_is_undefined_(self, ectx):
     for term in self._gcl_construct_:
-      if isinstance(term, DeferredValue) and not term._gcl_is_null_(ectx):
-        return False
+      if not isinstance(term, DeferredValue): return False
+      if not term._gcl_is_undefined_(ectx): return False
     return True
 
   def yamlet_clone(new_scope):

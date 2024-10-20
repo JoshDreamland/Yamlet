@@ -92,30 +92,29 @@ I mean, that's by design; this is how GCL templating works. Each tuple you
 chain onto the list overwrites the values in the previous tuples, and then
 expressions inherited from those tuples will use the new values.
 
-Additionally, you can use tuple composition to simply string together
-conditionals:
+### Conditionals
+
+Yamlet adds support for conditional statements, on top of `cond()` as used in
+the official GCL spec. In Yamlet, conditionals look like this:
 
 ```yaml
-t: !composite
-  - !if (1 + 1 == 2):
-    a: 10
-    b: { ba: 11 }
-  - !else
-    crap: value
-  - !if ('shark' == 'fish'):
-    more-crap: values
-  - !else
-    b: { bb: 12 }
-    c: 13
-  - !if ('crab' == 'crab'):
-    d: 14
-  - !else
-    crapagain: 2
+t:
+  !if platform == 'Windows':
+    directory_separator: \
+    executable_extension: exe
+    dylib_extension: dll
+  !elif platform == 'Linux':
+    directory_separator: /
+    executable_extension: null
+    dylib_extension: so
+  !else :
+    directory_separator: /
+    executable_extension: bin
+    dylib_extension: dylib
 ```
 
 Note that specifically because of the aforementioned problems, you must use this
-list flow in conditional statements (with ` - `), or else be extremely careful
-to put a space between your `!else` tag and the following colon.
+be careful to put a space between your `!else` tag and the following colon.
 
 ## Features
 The following are implemented:
