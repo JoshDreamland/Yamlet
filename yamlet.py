@@ -12,7 +12,6 @@ import tokenize
 ConstructorError = ruamel.yaml.constructor.ConstructorError
 class YamletBaseException(Exception): pass
 
-
 class YamletOptions:
   Error = ['error']
 
@@ -468,24 +467,22 @@ class _EvalContext:
     else: self._name_deps = {name: child}
     return child
 
-  def ExplainUp(self, indent=4, start_indent=0, _prep=None):
-    ind = ' ' * start_indent
+  def ExplainUp(self, indent=4, _prep=None):
+    ind = ' ' * indent
     if not _prep: _prep = 'From'
     me = self._trace_point.name
     me = me[0].lower() + me[1:]
     me = f'{_prep} {me} {str(self._trace_point.start).strip()}'
-    me = ind + f'{ind}\n'.join(me.splitlines())
-    ccount = ((len(self._children) if self._children else 0) +
-              (len(self._name_deps) if self._name_deps else 0))
-    if ccount > 1:
-      nindent = start_indent + indent
-      if ccount: me += '\n'
-    else: nindent = start_indent
-    return me + '\n'.join(
-        [f'{ind} - {child.ExplainUp(indent, nindent).lstrip()}'
-         for child in (self._children or [])]) + '\n'.join(
-        [f'{ind} - {child.ExplainUp(indent, nindent, _prep="With").lstrip()}'
-         for child in (self._name_deps or {}).values()])
+    me = f'\n'.join(me.splitlines())
+    froms = (ind + f'\n{ind}'.join(
+        [f' - {child.ExplainUp(indent).strip()}'
+         for child in (self._children or [])])).rstrip()
+    withs = (ind + f'\n{ind}'.join(
+        [f' - {child.ExplainUp(indent, _prep="With").strip()}'
+         for child in (self._name_deps or {}).values()])).rstrip()
+    if froms or withs: me += '\n'
+    if froms and withs: froms += '\n'
+    return f'{me}{froms}{withs}'
 
   def Scope(self, scope):
     return _EvalContext._ScopeVisit(self, scope)
@@ -965,8 +962,8 @@ def _TokensCollide(t1, t2):
   if t2.type == token.NAME and keyword.iskeyword(t2.string): return False
   if t1.type == token.STRING and t2.type == token.STRING: return False
   if t1.type == token.NAME and t2.type == token.OP:  return t2.string == '{'
-  if t2.type == token.OP and t2.string not in '([{': return False
-  if t1.type == token.OP and t1.string not in ')]}': return False
+  if t2.type == token.OP and t2.string not in '({': return False
+  if t1.type == token.OP and t1.string not in ')}': return False
   return True
 
 
@@ -1070,6 +1067,7 @@ def _BuiltinFuncsMapper():
     return if_true if condition else if_false
   return {
     'cond': cond,
+    'int': int, 'float': float, 'str': str,
   }
 _BUILTIN_FUNCS = _BuiltinFuncsMapper()
 
@@ -1111,7 +1109,6 @@ def _GclExprEval(expr, ectx):
 
 
 def _EvalGclAst(et, ectx):
-  _DebugPrint(ast.dump(et))
   ev = lambda x: _EvalGclAst(x, ectx)
   match type(et):
     case ast.Expression: return ev(et.body)
@@ -1127,11 +1124,19 @@ def _EvalGclAst(et, ectx):
       if isinstance(val, GclDict):
         try: return val._gcl_traceable_get_(et.attr, ectx)
         except KeyError: ectx.Raise(KeyError, f'No {et.attr} in this scope.')
-      return val[et.attr]
+      try: return val[et.attr]
+      except Exception as e:
+        ectx.Raise(KeyError, f'Cannot access attribute on value:\n  value'
+             f'({type(val).__name__}): {val}\n  attribute: {et.attr}\n', e)
     case ast.BinOp:
       l, r = ev(et.left), ev(et.right)
       match type(et.op):
         case ast.Add: return l + r
+        case ast.Sub: return l - r
+        case ast.Mult: return l * r
+        case ast.Div: return l / r
+        case ast.FloorDiv: return l // r
+        case ast.Mod: return l % r
       ectx.Raise(NotImplementedError, f'Unsupported binary operator `{et.op}`.')
     case ast.Compare:
       l = ev(et.left)
@@ -1190,6 +1195,12 @@ def _EvalGclAst(et, ectx):
       fun_args = [_EvalGclAst(arg, ectx) for arg in et.args]
       fun_kwargs = {kw.arg: _EvalGclAst(kw.value, ectx) for kw in et.keywords}
       return fun(*fun_args, **fun_kwargs)
+    case ast.Subscript:
+      v = ev(et.value)
+      if isinstance(et.slice, ast.Slice):
+        return v[et.slice.lower and ev(et.slice.lower)
+                :et.slice.upper and ev(et.slice.upper)]
+      return v[ev(et.slice)]
     case ast.List:
       return [ev(x) for x in et.elts]
     case ast.Dict:
@@ -1217,5 +1228,5 @@ def _CompositeGclTuples(tuples, ectx):
       res = res.yamlet_clone(ectx.scope)
       res.yamlet_merge(t, ectx)
     else:
-      res = t.yamlet_clone(ectx.scope)
+      res = t.yamlet_clone(ectx.scope) # if isinstance(t, Cloneable) else t
   return res

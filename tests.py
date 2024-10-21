@@ -642,6 +642,46 @@ class TestConditionals(unittest.TestCase):
     self.assertEqual(y.keys(), {'food'})
 
 
+@ParameterizedOnOpts
+class TestStress(unittest.TestCase):
+  def test_utter_insanity(self):
+    YAMLET = '''# Yamlet
+    name_number:
+      !if number > 1000:
+        name: !fmt '{lead.name} thousand{space}{remainder.name}'
+        lead: !expr |
+            name_number { number: up.number // 1000 }
+        space: !expr cond(lead and remainder.name, ' ', '')
+        remainder: !expr |
+            name_number { number: up.number % 1000 }
+      !elif number > 100:
+        name: !fmt '{lead.name} hundred{space}{remainder.name}'
+        lead: !expr |
+            name_number { number: int(up.number / 100) }
+        space: !expr cond(lead and remainder.name, ' ', '')
+        remainder: !expr |
+            name_number { number: up.number % 100 }
+      !elif number > 19:
+        name: !fmt '{lead}{hyphen}{remainder.name}'
+        lead: !expr |
+            ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty',
+            'seventy', 'eighty', 'ninety'][int(number / 10)]
+        hyphen: !expr cond(lead and remainder.name, '-', '')
+        remainder: !expr |
+            name_number { number: up.number % 10 }
+      !else:
+        name: !expr |
+            ['', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight',
+             'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen',
+             'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'][number]
+    val: !expr |
+        name_number { number: 236942 }
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['val']['name'], 'two hundred thirty-six thousand nine hundred forty-two')
+
+
 class FuzzyAnimalComparator:
   KINDS = {'hamster': 'rodent', 'rat': 'rodent', 'betta': 'fish', 'dog': 'dog'}
   def __init__(self, animal=None): self.animal = animal
