@@ -3,6 +3,7 @@ import copy
 import io
 import keyword
 import pathlib
+import re
 import ruamel.yaml
 import sys
 import token
@@ -132,15 +133,18 @@ class Loader(ruamel.yaml.YAML):
 
   def _ProcessYamlGcl(self, ygcl):
     tup = super().load(ygcl)
-    ectx = _EvalContext(None, self.yamlet_options, tup._yaml_point_,
-                        'Evaluating preprocessors in Yamlet document.')
-    while isinstance(tup, DeferredValue): tup = tup._gcl_resolve_(ectx)
+    ectx = None
+    while isinstance(tup, DeferredValue):
+      if not ectx:
+        ectx = _EvalContext(None, self.yamlet_options, tup._yaml_point_,
+                            'Evaluating preprocessors in Yamlet document.')
+      tup = tup._gcl_resolve_(ectx)
     _RecursiveUpdateParents(tup, None, self.yamlet_options)
     return tup
 
-  def load(self, filename):
-    with open(filename) as fn: return self.loads(fn)
-  def loads(self, yaml_gcl): return self._ProcessYamlGcl(yaml_gcl)
+  def load_file(self, filename):
+    with open(filename) as fn: return self.load(fn)
+  def load(self, yaml_gcl): return self._ProcessYamlGcl(_WrapStream(yaml_gcl))
 
 
 class _DebugOpts:
@@ -272,6 +276,8 @@ class GclDict(dict, Compositable):
     if k not in super().keys(): return f'`{k}` is not defined in this object.'
     obj = super().__getitem__(k)
     if isinstance(obj, DeferredValue):
+      if not obj._gcl_provenance_:
+        return f'`{k}` has not been evaluated,{obj._yaml_point_.start}'
       return obj._gcl_provenance_.ExplainUp(_prep = f'`{k}` was computed from')
     inherited = self._gcl_provenances_.get(k)
     if inherited:
@@ -519,11 +525,13 @@ class _EvalContext:
  ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
   ░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒'''
 
+
 class DeferredValue(Cloneable):
   def __init__(self, data, yaml_point):
     self._gcl_construct_ = data
     self._gcl_cache_ = _empty
     self._yaml_point_ = yaml_point
+    self._gcl_provenance_ = None
 
   def __eq__(self, other):
     return (isinstance(other, DeferredValue) and
@@ -744,6 +752,57 @@ class PreprocessingTuple(DeferredValue, Compositable):
     return PreprocessingTuple(self._gcl_construct_.yamlet_clone(new_scope))
   def yamlet_merge(self, other, ectx):
     self._gcl_construct_.yamlet_merge(other, ectx)
+
+
+'''▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+░▒▓██████████████████████████████████████████████████████████████████████████▓▒░
+░▒▓█▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀█▓▒░
+░▒▓█ Stream manipulation:  Preprocess YAML sources to work around bugs.     █▓▒░
+░▒▓█▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄█▓▒░
+░▒▓██████████████████████████████████████████████████████████████████████████▓▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+  ░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒'''
+
+
+def _FixElseColons(s):
+  '''This is a miserable hack that is necessary to save headaches for now.
+
+  The YAML spec allows colons in tags, so `!else:` is a valid tag and does not
+  start a mapping, even though `: ` and `:\n` are supposed to always begin a
+  mapping. This project is getting screwed both ways by that behavior.
+
+  To work around it, we just replace any free-standing `!else:` with `!else :`,
+  which could modify a value in user data if it appears inside a literal-style
+  block. There's nothing reasonable I can do about that right now.
+  '''
+  return re.sub('(\\s*!else):(\\s*#.*|\\s*)$', r'\1 :\2', s, flags=re.MULTILINE)
+
+
+class ReplaceElseStream(io.IOBase):
+  def __init__(self, original_stream):
+    self.original_stream = original_stream
+
+  def read(self, size=-1):
+    data = self.original_stream.read(size)
+    return data and _FixElseColons(data)
+
+  def readline(self, size=-1):
+    line = self.original_stream.readline(size)
+    return line and _FixElseColons(line)
+
+  def readlines(self):
+    return [_FixElseColons(line) for line in self.original_stream.readlines()]
+
+  # Delegate other file-like operations to the original stream
+  def __getattr__(self, attr):
+    return getattr(self.original_stream, attr)
+
+
+def _WrapStream(s):
+  if isinstance(s, str): return _FixElseColons(s)
+  if isinstance(s, io.IOBase): return ReplaceElseStream(s)
+  raise TypeError(f'Cannot load {type(s).__name__} object as Yamlet stream')
 
 
 '''▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░

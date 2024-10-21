@@ -11,6 +11,21 @@ childtuple2: !expr t2 t1.tuple2
 horribletuple: !expr t2 t1.tuple
 horribletuple2: !expr t1.tuple2 t2
 
+conditionals:
+  !if my_switch == 'option 1':
+    value: You chose the first option.
+  !elif my_switch == 'option 2':
+    value: You chose the second option.
+  !else:
+    value: You chose some other option.
+
+c1: !expr |
+  conditionals { my_switch: 'option 1' }
+c2: !expr |
+  conditionals { my_switch: 'option 2' }
+c3: !expr |
+  conditionals { my_switch: 'option 3' }
+
 other_features:
   timestamp: !expr now()
   double: !lambda 'x: x + x'

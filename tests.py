@@ -96,7 +96,7 @@ class TestTupleCompositing(unittest.TestCase):
     comp3: !expr t1 t2 t3
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     for compn in ['comp1', 'comp2', 'comp3']:
       self.assertTrue(compn in y)
       comp = y[compn]
@@ -123,7 +123,7 @@ class TestTupleCompositing(unittest.TestCase):
       }
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y['t1']['deferred'], 'Hello, world!')
     self.assertEqual(y['t2']['deferred'], 'Hello, all you happy people!')
 
@@ -139,7 +139,7 @@ class TestTupleCompositing(unittest.TestCase):
       }
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y['t2']['sub']['deferred'], 'Hello, world!')
 
   def test_parents_update_2(self):
@@ -162,7 +162,7 @@ class TestTupleCompositing(unittest.TestCase):
       }
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y['t2']['sub']['deferred'], 'Hello, world!')
 
   def test_parents_update_3(self):
@@ -174,7 +174,7 @@ class TestTupleCompositing(unittest.TestCase):
       sub: !expr t1
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y['t2']['sub']['deferred'], 'Hello, world!')
 
   def test_parents_update_4(self):
@@ -187,7 +187,7 @@ class TestTupleCompositing(unittest.TestCase):
         - t1
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y['t2']['sub']['deferred'], 'Hello, world!')
 
   def test_nullification(self):
@@ -204,7 +204,7 @@ class TestTupleCompositing(unittest.TestCase):
     t3: !expr t1 t2
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(len(y['t1']), 4)
     self.assertEqual(len(y['t2']), 3)
     self.assertEqual(len(y['t3']), 2)
@@ -219,7 +219,7 @@ class TestTupleCompositing(unittest.TestCase):
         exp: !expr v
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     with AssertRaisesCleanException(self, ValueError):
       val = y['t1']['sub']['exp']
       self.fail(f'Did not throw an exception; got `{val}`')
@@ -233,7 +233,7 @@ class TestTupleCompositing(unittest.TestCase):
         exp: !expr v
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual( y['t1']['sub']['exp'], 'value')
 
 
@@ -253,7 +253,7 @@ class TestInheritance(unittest.TestCase):
           counting: !fmt '{up.super.a} {super.a} {up.a} {a}'
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y['t2']['sub']['counting'], 'one two three four')
 
   def test_invalid_up_super_usage(self):
@@ -263,7 +263,7 @@ class TestInheritance(unittest.TestCase):
       x: an actual value
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     with AssertRaisesCleanException(self, KeyError):
         val = y['t']['a']
         self.fail(f'Did not throw an exception; got `{val}`')
@@ -278,7 +278,7 @@ class TestStringMechanics(unittest.TestCase):
     v3: !fmt '{{{v}}}, {{{{{v2}}}}}{{s}}!'
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y['v3'], '{Hello}, {{world}}{s}!')
 
 
@@ -298,7 +298,7 @@ class TestFunctions(unittest.TestCase):
       return uniq
 
     loader = yamlet.Loader(self.Opts(functions={'func': func}))
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertTrue(y['t']['v'] is uniq)
     self.assertEqual(side_effect, ['Hello, ', ['world!']])
 
@@ -317,7 +317,7 @@ class TestConditionals(unittest.TestCase):
       - { blocked: False }
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y['t2']['color'], 'red')
     self.assertEqual(y['t3']['color'], 'green')
 
@@ -340,7 +340,7 @@ class TestConditionals(unittest.TestCase):
       - { blocked: False }
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y['t2']['conditionals']['color'], 'red')
     self.assertEqual(y['t2']['conditionals']['val'], 'Color: red')
     self.assertEqual(y['t3']['conditionals']['val'], 'Color: green')
@@ -356,7 +356,7 @@ class TestConditionals(unittest.TestCase):
         toys: !expr ([favorite_toy])
       !elif animal == 'cat':
         diet: meat
-      !else :
+      !else:
         recommendation: specialist
     t1: !expr |
         t0 { animal: 'cat' }
@@ -371,7 +371,7 @@ class TestConditionals(unittest.TestCase):
         t0 { animal: 'squirrel' }
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y['t1']['diet'], 'meat')
     self.assertEqual(y['t2']['action'], 'pats')
     self.assertEqual(y['t2']['attention'], 'pats')
@@ -398,7 +398,7 @@ class TestConditionals(unittest.TestCase):
         toys: !expr ([favorite_toy])
       !elif animal == 'cat':
         diet: meat
-      !else :
+      !else:
         recommendation: specialist
     t1: !expr |
         t0 { animal: 'cat' }
@@ -413,7 +413,7 @@ class TestConditionals(unittest.TestCase):
         t0 { animal: 'squirrel' }
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y['t1'].evaluate_fully(), {
         'animal': 'cat',
         'diet': 'meat'})
@@ -435,22 +435,22 @@ class TestConditionals(unittest.TestCase):
     !if (1 + 1 == 2):
       a: 10
       b: { ba: 11 }
-    !else :
+    !else:
       crap: value
     !if ('shark' == 'fish'):
       more-crap: values
     !elif ('crab' == 'crab'):
       b: { bb: 12 }
       c: 13
-    !else :
+    !else:
       still-crap: 10
     !if ('fish' == 'fish'):
       d: 14
-    !else :
+    !else:
       crapagain: 2
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertTrue('a' in y)
     self.assertTrue('b' in y)
     self.assertTrue('c' in y)
@@ -471,15 +471,15 @@ class TestConditionals(unittest.TestCase):
       !if (1 + 1 == 2):
         a: 10
         b: { ba: 11 }
-      !else :
+      !else:
         crap: value
       !if (2 + 2 == 6):
         crap: value
-      !else :
+      !else:
         b: { bb: 12 }
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertTrue('a' in y['t'])
     self.assertTrue('b' in y['t'])
     self.assertEqual(y['t']['a'], 10)
@@ -497,7 +497,7 @@ class TestConditionals(unittest.TestCase):
           result: 'AX'
         !elif inner == 'Y':
           result: 'AY'
-        !else :
+        !else:
           result: 'A?'
       !elif outer == 'B':
         !if inner == 'X':
@@ -506,7 +506,7 @@ class TestConditionals(unittest.TestCase):
           result: 'BY'
         !else :
           result: 'B?'
-      !else :
+      !else:
         result: 'Unknown'
     t2: !expr |
         t1 { outer: 'A', inner: 'X' }
@@ -521,7 +521,7 @@ class TestConditionals(unittest.TestCase):
     '''
 
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
 
     # Check for various nested conditions
     self.assertEqual(y['t2']['result'], 'AX')  # outer == 'A', inner == 'X'
@@ -539,7 +539,7 @@ class TestConditionals(unittest.TestCase):
             result: AX1
           !elif last == 2:
             result: AX2
-          !else :
+          !else:
             result: AX?
         !elif middle == 'Y':
           !if last == 1:
@@ -548,7 +548,7 @@ class TestConditionals(unittest.TestCase):
             result: AY2
           !else :
             result: AY?
-        !else :
+        !else:
           result: 'A??'
       !elif first == 'B':
         !if middle == 'X':
@@ -563,11 +563,11 @@ class TestConditionals(unittest.TestCase):
             result: BY1
           !elif last == 2:
             result: BY2
-          !else :
+          !else:
             result: BY?
-        !else :
+        !else:
           result: 'B??'
-      !else :
+      !else:
         result: '???'
     ax1: !composite [tp, {first: 'A', middle: 'X', last: 1}]
     ax2: !composite [tp, {first: 'A', middle: 'X', last: 2}]
@@ -587,7 +587,7 @@ class TestConditionals(unittest.TestCase):
     '''
 
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
 
     # Check for various nested conditions
     self.assertEqual(y['ax1']['result'], 'AX1')
@@ -614,30 +614,30 @@ class TestConditionals(unittest.TestCase):
         habitat: tubes
     !elif fuzzy == 'fish':
       food: flake
-    !else :
+    !else:
       food: kibble
     '''
     fuzzy = FuzzyAnimalComparator()
     loader = yamlet.Loader(self.Opts(globals={'fuzzy': fuzzy}))
 
     fuzzy.animal = 'hamster'
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y.keys(), {'food', 'habitat'})
     self.assertEqual(y['food'], 'pellet')
     self.assertEqual(y['habitat'], 'tubes')
 
     fuzzy.animal = 'betta'
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y.keys(), {'food'})
     self.assertEqual(y['food'], 'flake')
 
     fuzzy.animal = 'dog'
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y.keys(), {'food'})
     self.assertEqual(y['food'], 'kibble')
 
     fuzzy.animal = 'rat'
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y['food'], 'pellet')
     self.assertEqual(y.keys(), {'food'})
 
@@ -651,7 +651,6 @@ class FuzzyAnimalComparator:
         self.KINDS.get(self.animal) == oa or self.KINDS.get(oa) == self.animal)
 
 
-@ParameterizedOnOpts
 class AssertRaisesCleanException:
   def __init__(self, tester, exc_tp, min_context=15, max_context=30):
     self.tester = tester
@@ -738,7 +737,7 @@ class TestFlatCompositing(unittest.TestCase):
     flashy: !expr tp {switch:'on'}
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y['tp']['variable'], 'defaulted value')
     self.assertEqual(y['flashy']['variable'], 'specialized value')
     self.assertEqual(y['boring']['variable'], 'defaulted value')
@@ -755,7 +754,7 @@ class TestFlatCompositing(unittest.TestCase):
     '''
     ctors = {'!rel': TestFlatCompositing.RelativeStringValue}
     loader = yamlet.Loader(self.Opts(constructors=ctors))
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y['tp']['variable'], 'defaulted value')
     self.assertEqual(y['flashy']['variable'], 'defaulted value specialized value')
     self.assertEqual(y['boring']['variable'], 'defaulted value')
@@ -770,7 +769,7 @@ class TestRecursion(unittest.TestCase):
       b: !expr a
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     with AssertRaisesCleanException(self, RecursionError):
       val = y['recursive']['a']
       self.fail(f'Did not throw an exception; got `{val}`')
@@ -788,7 +787,7 @@ class TestRecursion(unittest.TestCase):
       - childvalue: !expr parentvalue != 'blue'
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     with AssertRaisesCleanException(self, RecursionError, max_context=40):
       val = y['child']['parentvalue']
       self.fail(f'Did not throw an exception; got `{val}`')
@@ -812,7 +811,7 @@ class GptsTestIdeas(unittest.TestCase):
             test: !fmt '{up.up.super.a} {up.a} {super.a} {a}'
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y['t2']['sub']['subsub']['test'], 'base level1 level2 override')
 
   def test_nested_nullification(self):
@@ -830,7 +829,7 @@ class GptsTestIdeas(unittest.TestCase):
     t3: !expr t1 t2
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertFalse(isinstance(y['t3']['sub'], yamlet.DeferredValue))
     self.assertEqual(y['t3'], {'b': 'boy', 'sub': {'c': 'cat'}})
 
@@ -845,7 +844,7 @@ class GptsTestIdeas(unittest.TestCase):
           result: !fmt '{up.a} {up.up.a} {a}'
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     self.assertEqual(y['t1']['sub']['subsub']['result'], 'intermediate original final')
 
   def test_invalid_up_usage(self):
@@ -853,7 +852,7 @@ class GptsTestIdeas(unittest.TestCase):
     a: !expr up.a
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     with AssertRaisesCleanException(self, ValueError):
         val = y['a']
         self.fail(f'Did not throw an exception; got `{val}`')
@@ -866,10 +865,38 @@ class GptsTestIdeas(unittest.TestCase):
         a: !expr super.a
     '''
     loader = yamlet.Loader(self.Opts())
-    y = loader.loads(YAMLET)
+    y = loader.load(YAMLET)
     with AssertRaisesCleanException(self, ValueError):
         val = y['t1']['sub']['a']
         self.fail(f'Did not throw an exception; got `{val}`')
+
+
+@ParameterizedOnOpts
+class RunExample(unittest.TestCase):
+  def test_main_yamlet_example(self):
+    loader = yamlet.Loader(self.Opts(functions={'now': lambda: 'now o\'clock'}))
+    t = loader.load_file('yaml-gcl.yaml')
+    self.assertEqual(t['childtuple']['coolbeans'], 'Hello, world! I say cooool beans!')
+    self.assertEqual(t['childtuple2']['coolbeans'], 'Hello, world! I say awesome sauce!')
+
+    # Didn't I tell you not to do this?
+    self.assertEqual(t['horribletuple']['coolbeans'], 'Hello, world! I say cooool sauce!')
+    self.assertEqual(t['horribletuple2']['coolbeans'], 'Hello, world! I say awesome beans!')
+
+    self.assertEqual(t['other_features']['timestamp'], 'now o\'clock')
+    self.assertEqual(t['other_features']['two'], 2)
+
+    self.assertEqual(t['c1']['value'], 'You chose the first option.')
+    self.assertEqual(t['c2']['value'], 'You chose the second option.')
+    self.assertEqual(t['c3']['value'], 'You chose some other option.')
+
+    # The following would break because of cycles.
+    # print(t['recursive']['a'])
+
+    def assertLenGreater(x, l): self.assertGreater(len(x), l, f'Length of: {x}')
+    assertLenGreater(t['childtuple'].explain_value('coolbeans'), 50)
+    assertLenGreater(t['childtuple'].explain_value('beans'),  50)
+    assertLenGreater(t['childtuple2'].explain_value('beans'), 50)
 
 
 if __name__ == '__main__':
