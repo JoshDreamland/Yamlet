@@ -171,11 +171,25 @@ class TestTupleCompositing(unittest.TestCase):
       deferred: !fmt Hello, {val}!
     t2:
       val: world
-      sub: !expr t1
+      sub: !expr t1 {}
     '''
     loader = yamlet.Loader(self.Opts())
     y = loader.load(YAMLET)
     self.assertEqual(y['t2']['sub']['deferred'], 'Hello, world!')
+
+  def test_parents_update_3b(self):
+    YAMLET = '''# YAMLET
+    t1:
+      deferred: !fmt Hello, {val}!
+    t2:
+      val: world
+      sub: !expr t1
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    with AssertRaisesCleanException(self, NameError):
+      val = y['t2']['sub']['deferred']
+      self.fail(f'Did not throw an exception; got `{val}`')
 
   def test_parents_update_4(self):
     YAMLET = '''# YAMLET
@@ -189,6 +203,19 @@ class TestTupleCompositing(unittest.TestCase):
     loader = yamlet.Loader(self.Opts())
     y = loader.load(YAMLET)
     self.assertEqual(y['t2']['sub']['deferred'], 'Hello, world!')
+
+  def test_compositing_in_parenths(self):
+    YAMLET = '''# YAMLET
+    t1:
+      a: 10
+      b: 10
+      c: 30
+    val: !expr |
+        len(t1 {c: 30, d: 40, e:50})
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['val'], 5)
 
   def test_nullification(self):
     YAMLET = '''# YAMLET

@@ -983,18 +983,17 @@ def _ParseIntoChunks(expr):
     cur_tokens.append(tok)
     if tok.type != token.COMMENT: prev_tok = tok
   token_blocks.append(cur_tokens)
-  def Parse(tokens):
+  def Untokenize(tokens):
     untokenized = tokenize.untokenize(tokens)
     if not isinstance(untokenized, str):
       untokenized = untokenized.decode('utf-8')
-    expstr = f'(\n{untokenized}\n)'
-    try:
-      return ast.parse(expstr, mode='eval')
-    except Exception as e:
-      raise SyntaxError(f'Failed to parse ast from `{expstr}`'
-                        f' when processing these chunks: {token_blocks}') from e
-  _DebugPrint(f'Chunked as {token_blocks}')
-  return [Parse(tokens) for tokens in token_blocks]
+    return untokenized
+  untokenized = '\n@ '.join([Untokenize(tokens) for tokens in token_blocks])
+  expstr = f'(\n{untokenized}\n)'
+  try: return ast.parse(expstr, mode='eval')
+  except Exception as e:
+    raise SyntaxError(f'Failed to parse ast from `{expstr}`'
+                      f' when processing these chunks: {token_blocks}') from e
 
 
 def _ResolveStringValue(val, ectx):
@@ -1066,7 +1065,7 @@ def _BuiltinFuncsMapper():
   def cond(condition, if_true, if_false):
     return if_true if condition else if_false
   return {
-    'cond': cond,
+    'cond': cond, 'len': len,
     'int': int, 'float': float, 'str': str,
   }
 _BUILTIN_FUNCS = _BuiltinFuncsMapper()
@@ -1102,10 +1101,7 @@ def _GclNameLookup(name, ectx):
 
 def _GclExprEval(expr, ectx):
   _DebugPrint(f'Evaluate: {expr}')
-  chunks = _ParseIntoChunks(expr)
-  vals = [_EvalGclAst(chunk, ectx) for chunk in chunks]
-  if len(vals) == 1 and not isinstance(vals[0], GclDict): return vals[0]
-  return _CompositeGclTuples(vals, ectx)
+  return _EvalGclAst(_ParseIntoChunks(expr), ectx)
 
 
 def _EvalGclAst(et, ectx):
@@ -1137,6 +1133,7 @@ def _EvalGclAst(et, ectx):
         case ast.Div: return l / r
         case ast.FloorDiv: return l // r
         case ast.Mod: return l % r
+        case ast.MatMult: return _CompositeGclTuples([l, r], ectx)
       ectx.Raise(NotImplementedError, f'Unsupported binary operator `{et.op}`.')
     case ast.Compare:
       l = ev(et.left)
