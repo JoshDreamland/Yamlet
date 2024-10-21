@@ -20,12 +20,171 @@ class YamletOptions:
   CACHE_DEBUG = 3
 
   def __init__(self, import_resolver=None, missing_name_value=Error,
-               functions={}, globals={}, caching=CACHE_VALUES):
+               functions={}, globals={}, constructors={}, caching=CACHE_VALUES,
+               _yamlet_debug_opts=None):
     self.import_resolver = import_resolver or str
     self.missing_name_value = missing_name_value
     self.functions = functions
     self.globals = globals
     self.caching = caching
+    self.constructors = constructors
+    self.debugging = _yamlet_debug_opts or _DebugOpts()
+
+
+class Loader(ruamel.yaml.YAML):
+  def __init__(self, opts):
+    super().__init__()
+    self.loaded_modules = {}
+    self.yamlet_options = opts
+    # Set custom dict type for base operations
+    self.constructor.yaml_base_dict_type = GclDict
+    self.representer.add_representer(GclDict, self.representer.represent_dict)
+
+    def UndefinedConstructor(self, node):
+      raise ConstructorError(
+          None, None,  f'No constructor bound for tag `{node.tag}`',
+          node.start_mark)
+    def GclImport(loader, node):
+      filename = loader.construct_scalar(node)
+      res = ModuleToLoad(filename, YamlPoint(node.start_mark, node.end_mark))
+      res._gcl_loader_ = lambda fn: self.LoadCachedFile(fn)
+      return res
+    def ConstructScalar(tp):
+      def Constructor(loader, node):
+        return tp(loader.construct_scalar(node),
+                  YamlPoint(node.start_mark, node.end_mark))
+      return Constructor
+    def ConstructConstant(tag, val):
+      def Constructor(loader, node):
+        n = loader.construct_scalar(node)
+        if n != '': raise ConstructorError(None, None,
+            f'Yamlet `!{tag}` got unexpected node type: {repr(node)}',
+            node.start_mark)
+        return val
+      return Constructor
+    def UserConstructor(ctor):
+      def Construct(loader, node):
+        try: return ctor(loader, node)
+        except Exception as e:
+          raise ConstructorError(None, None,
+              f'Yamlet user constructor `!{tag}` encountered an error; '
+              'is your type constructable from `(ruamel.Loader, ruamel.Node)`?',
+              node.start_mark) from e
+      return Construct
+
+    yc = self.constructor
+    yc.add_constructor(None, UndefinedConstructor)  # Raise on undefined tags
+    yc.add_constructor(ruamel.yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+                       self.ConstructGclDict)
+    yc.add_constructor("!import",    GclImport)
+    yc.add_constructor("!composite", self.DeferGclComposite)
+    yc.add_constructor("!fmt",       ConstructScalar(StringToSubstitute))
+    yc.add_constructor("!expr",      ConstructScalar(ExpressionToEvaluate))
+    yc.add_constructor("!lambda",    ConstructScalar(GclLambda))
+    yc.add_constructor("!if",        ConstructScalar(YamletIfStatement))
+    yc.add_constructor("!elif",      ConstructScalar(YamletElifStatement))
+    yc.add_constructor("!else",      Loader._ConstructElse)
+    yc.add_constructor("!null",      ConstructConstant('null',     null))
+    yc.add_constructor("!external",  ConstructConstant('external', external))
+    for tag, ctor in opts.constructors.items():
+      yc.add_constructor(tag, UserConstructor(ctor))
+
+  def LoadCachedFile(self, fn):
+    fn = fn.resolve()
+    if fn in self.loaded_modules:
+      res = self.loaded_modules[fn]
+      if res is None:
+        raise RecursionError(f'Processing config `{fn}` results in recursion. '
+                             'This isn\'t supposed to happen, as import loads '
+                             'are deferred until name lookup.')
+      return res
+    self.loaded_modules[fn] = None
+    with open(fn) as file: res = self._ProcessYamlGcl(file)
+    self.loaded_modules[fn] = res
+    return res
+
+  def ConstructGclDict(self, loader, node):
+    return ProcessYamlPairs(
+        loader.construct_pairs(node), gcl_opts=self.yamlet_options,
+        yaml_point=YamlPoint(start=node.start_mark, end=node.end_mark))
+
+  def DeferGclComposite(self, loader, node):
+    marks = YamlPoint(node.start_mark, node.end_mark)
+    if isinstance(node, ruamel.yaml.ScalarNode):
+      return TupleListToComposite(loader.construct_scalar(node).split(), marks)
+    if isinstance(node, ruamel.yaml.SequenceNode):
+      return TupleListToComposite(loader.construct_sequence(node), marks)
+    raise ConstructorError(None, None,
+        f'Yamlet `!composite` got unexpected node type: {repr(node)}',
+        node.start_mark)
+
+  def _ConstructElse(loader, node):
+    marks = YamlPoint(node.start_mark, node.end_mark)
+    if isinstance(node, ruamel.yaml.ScalarNode):
+      s = loader.construct_scalar(node)
+      if s: raise ruamel.yaml.constructor.ConstructorError(
+          None, None,
+          f'A Yamlet `!else` should not have a value attached, '
+          f'but contained {s}', node.start_mark)
+      return YamletElseStatement('', marks)
+    raise ruamel.yaml.constructor.ConstructorError(
+        f'Yamlet `!else` got unexpected node type: {repr(node)}')
+
+  def _ProcessYamlGcl(self, ygcl):
+    tup = super().load(ygcl)
+    ectx = _EvalContext(None, self.yamlet_options, tup._yaml_point_,
+                        'Evaluating preprocessors in Yamlet document.')
+    while isinstance(tup, DeferredValue): tup = tup._gcl_resolve_(ectx)
+    _RecursiveUpdateParents(tup, None, self.yamlet_options)
+    return tup
+
+  def load(self, filename):
+    with open(filename) as fn: return self.loads(fn)
+  def loads(self, yaml_gcl): return self._ProcessYamlGcl(yaml_gcl)
+
+
+class _DebugOpts:
+  '''This class contains debugging options that aren't really meant for users.
+
+  If you're reading this, though, you might find this class useful... 😛
+  '''
+  PREPROCESS_MINIMAL = 0     # Whether to use PreprocessingTuple if there are
+  PREPROCESS_EVERYTHING = 1  # active preprocessors, or always.
+
+  TRACE_PRETTY = 0    # Whether to include the entire dump of exception traces,
+  TRACE_VERBOSE = 1   # or just the trace in the Yamlet input + user code.
+
+  def __init__(self, preprocessing=None, traces=None):
+    def default(x, y): return y if x is None else x
+    self.preprocessing = default(preprocessing, _DebugOpts.PREPROCESS_MINIMAL)
+    self.traces = default(traces, _DebugOpts.TRACE_VERBOSE)
+
+
+'''▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+░▒▓██▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀██▓▒░
+░▒▓██  Some basic built-ins and interfaces.                                ██▓▒░
+░▒▓██▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄██▓▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+  ░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒'''
+
+
+def _NoneType(name):
+  class Nothing:
+    def __bool__(self): return False
+    def __nonzero__(self): return False
+    def __str__(self): return name
+    def __repr__(self): return name
+  return Nothing
+
+
+def _BuiltinNones():
+  class external(_NoneType('external')): pass
+  class null(_NoneType('null')): pass
+  class undefined(_NoneType('undefined')): pass
+  class empty(_NoneType('empty')): pass
+  return external(), null(), undefined(), empty()
+external, null, _undefined, _empty = _BuiltinNones()
 
 
 class Cloneable:
@@ -37,9 +196,9 @@ class Cloneable:
   updated to point within the new cloned ecosystem.
   '''
   def yamlet_clone(self, new_scope):
-    ectx.Raise(NotImplementedError, 'A class which implements '
-               '`yamlet.Cloneable` should implement yamlet_clone(); '
-               f'`{type(self).__name__}` does not.')
+    raise NotImplementedError(
+        'A class which extends `yamlet.Cloneable` should implement '
+        f'`yamlet_clone()`; `{type(self).__name__}` does not.')
 
 
 class Compositable(Cloneable):
@@ -54,6 +213,15 @@ class Compositable(Cloneable):
                f'`{type(self).__name__}` does not.')
 
 
+'''▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+░▒▓██▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀██▓▒░
+░▒▓██  GclDict:  Grand Central Dispatch for deferred values from files.    ██▓▒░
+░▒▓██▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄██▓▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+  ░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒'''
+
+
 class GclDict(dict, Compositable):
   def __init__(self, *args,
                gcl_parent, gcl_super, gcl_opts, yaml_point, preprocessors,
@@ -63,38 +231,33 @@ class GclDict(dict, Compositable):
     self._gcl_super_ = gcl_super
     self._gcl_opts_ = gcl_opts
     self._gcl_preprocessors_ = preprocessors or {}
-    self._gcl_provenance_ = {}
+    self._gcl_provenances_ = {}
     self._yaml_point_ = yaml_point
 
   def _resolvekv(self, k, v, ectx=None):
     bt_msg = f'Lookup of `{k}` in this scope'
     if ectx: ectx = ectx.BranchForNameResolution(bt_msg, k, self)
-    if isinstance(v, DeferredValue):
+    while isinstance(v, DeferredValue):
       uncaught_recursion = None
       ectx = ectx or (
           _EvalContext(self, self._gcl_opts_, self._yaml_point_, name=bt_msg))
-      try:
-        r = v._gcl_resolve_(ectx)
-        # XXX: This is a nice optimization but breaks accessing templates before
-        # their derived types. We need to let the caching done in DeferredValue
-        # handle it for that case.
-        # self.__setitem__(k, r)
-        return r
-      except RecursionError as r:
-        raise
-        uncaught_recursion = r
-      if uncaught_recursion:
-        ectx.Raise(RecursionError,
-                   f'Uncaught recursion error in access.', uncaught_recursion)
-      raise exception_during_access
-    else:
-      return v
+      v = v._gcl_resolve_(ectx)
+      # XXX: This is a nice optimization but breaks accessing templates before
+      # their derived types. We need to let the caching done in DeferredValue
+      # handle it for that case.
+      # self.__setitem__(k, r)
+    return v
 
   def __getitem__(self, key):
     try:
       return self._resolvekv(key, super().__getitem__(key))
-    except ExceptionWithYamletTrace as e: exception_during_access = e.rewind()
-    raise exception_during_access
+    except ExceptionWithYamletTrace as e: exception_during_access = e
+    e = exception_during_access
+    exception_during_access = e.rewind()
+    if self._gcl_opts_.debugging.traces:
+      raise exception_during_access from e
+    else:
+      raise exception_during_access
 
   def __contains__(self, key):
     return super().get(key, null) is not null
@@ -110,7 +273,7 @@ class GclDict(dict, Compositable):
     obj = super().__getitem__(k)
     if isinstance(obj, DeferredValue):
       return obj._gcl_provenance_.ExplainUp(_prep = f'`{k}` was computed from')
-    inherited = self._gcl_provenance_.get(k)
+    inherited = self._gcl_provenances_.get(k)
     if inherited:
       return f'`{k}` was inherited from another tuple {_TuplePointStr(inherited)}'
     return f'`{k}` was declared directly in this tuple {_TuplePointStr(self)}'
@@ -118,6 +281,9 @@ class GclDict(dict, Compositable):
   def yamlet_merge(self, other, ectx):
     ectx.Assert(isinstance(other, Compositable),
                 'Expected Compositable to merge.', ex_class=TypeError)
+    ectx.Assert(isinstance(other, GclDict) or
+                isinstance(other, PreprocessingTuple),
+                'Expected dict-like type to composite.', ex_class=TypeError)
     for k, v in other._gcl_noresolve_items_():
       if isinstance(v, Compositable):
         v1 = super().setdefault(k, v)
@@ -134,10 +300,10 @@ class GclDict(dict, Compositable):
       elif isinstance(v, Cloneable):
         super().__setitem__(k, v.yamlet_clone(self))
       elif v or (v not in (null, external, _undefined)):
-        self._gcl_provenance_[k] = other._gcl_provenance_.get(k, other)
+        self._gcl_provenances_[k] = other._gcl_provenances_.get(k, other)
         super().__setitem__(k, v)
       elif v is null:
-        self._gcl_provenance_[k] = other._gcl_provenance_.get(k, other)
+        self._gcl_provenances_[k] = other._gcl_provenances_.get(k, other)
         super().pop(k, None)
       elif v is _undefined:
         ectx.Raise(AssertionError,
@@ -188,40 +354,6 @@ class GclDict(dict, Compositable):
   def _gcl_noresolve_get_(self, k): return super().__getitem__(k)
   def _gcl_traceable_get_(self, key, ectx):
     return self._resolvekv(key, super().__getitem__(key), ectx)
-
-
-class YamletLoader(ruamel.yaml.YAML):
-  def __init__(self, *args, gcl_opts, **kwargs):
-    super().__init__(*args, **kwargs)
-    # Set custom dict type for base operations
-    self.constructor.yaml_base_dict_type = GclDict
-    self.representer.add_representer(GclDict, self.representer.represent_dict)
-
-    def UndefinedConstructor(self, node):
-      raise ConstructorError(
-          None, None,  f'No constructor bound for tag `{node.tag}`',
-          node.start_mark)
-
-    # Raise on undefined tags
-    self.constructor.add_constructor(None, UndefinedConstructor)
-
-
-def _NoneType(name):
-  class Nothing:
-    def __bool__(self): return False
-    def __nonzero__(self): return False
-    def __str__(self): return name
-    def __repr__(self): return name
-  return Nothing
-
-
-def _BuiltinNones():
-  class external(_NoneType('external')): pass
-  class null(_NoneType('null')): pass
-  class undefined(_NoneType('undefined')): pass
-  class empty(_NoneType('empty')): pass
-  return external(), null(), undefined(), empty()
-external, null, _undefined, _empty = _BuiltinNones()
 
 
 '''▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░
@@ -530,7 +662,9 @@ class FlatCompositor(DeferredValue):
             f'External value found while evaluating `{self._gcl_varname_}`.')
         active_composite.append(term)
     if len(active_composite) == 1: return active_composite[0]
-    if any(not isinstance(term, Compositable) for term in active_composite):
+    cxable = sum(isinstance(term, Compositable) for term in active_composite)
+    if cxable != len(active_composite):
+      if not cxable: return active_composite[-1]
       ectx.Raise(ValueError, f'Multiple non-compisitable values given for '
                              f'`{self._gcl_varname_}`.')
     return _CompositeGclTuples(active_composite, ectx)
@@ -541,10 +675,11 @@ class FlatCompositor(DeferredValue):
       if not term._gcl_is_undefined_(ectx): return False
     return True
 
-  def yamlet_clone(new_scope):
+  def yamlet_clone(self, new_scope):
     return FlatCompositor(
         [v.yamlet_clone(new_scope) if isinstance(v, Cloneable) else v
-            for v in self._gcl_construct_], self._yaml_point_)
+            for v in self._gcl_construct_], self._yaml_point_,
+            varname=self._gcl_varname_)
 
 
 class GclLambda:
@@ -588,6 +723,7 @@ class GclLambda:
 
 class PreprocessingTuple(DeferredValue, Compositable):
   def __init__(self, tup, yaml_point=None):
+    assert(isinstance(tup, GclDict))
     super().__init__(tup, yaml_point or tup._yaml_point_)
   def _gcl_explanation_(self):
     return f'Preprocessing Yamlet tuple literal'
@@ -599,10 +735,11 @@ class PreprocessingTuple(DeferredValue, Compositable):
     return self._gcl_construct_._gcl_noresolve_items_()
   def __getattr__(self, attr):
     if attr == '_gcl_parent_': return self._gcl_construct_._gcl_parent_
-    if attr == '_gcl_provenance_': return self._gcl_construct_._gcl_provenance_
+    if attr == '_gcl_provenances_': return self._gcl_construct_._gcl_provenances_
     if attr == '_gcl_preprocessors_':
       return self._gcl_construct_._gcl_preprocessors_
     raise AttributeError(f'PreprocessingTuple has no attribute `{attr}`')
+  def __eq__(self, other): return self._gcl_construct_ == other
   def yamlet_clone(self, new_scope):
     return PreprocessingTuple(self._gcl_construct_.yamlet_clone(new_scope))
   def yamlet_merge(self, other, ectx):
@@ -743,116 +880,10 @@ def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point):
   res = GclDict(filtered_pairs,
                 gcl_parent=None, gcl_super=None, gcl_opts=gcl_opts,
                 preprocessors=preprocessors, yaml_point=yaml_point)
-  if preprocessors: return PreprocessingTuple(res)
+  preprocess_everything = (
+      gcl_opts.debugging.preprocessing == _DebugOpts.PREPROCESS_EVERYTHING)
+  if preprocessors or preprocess_everything: return PreprocessingTuple(res)
   return res
-
-
-'''▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░
- ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
-░▒▓██▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀██▓▒░
-░▒▓██  DynamicScopeLoader:  The user interface to Yamlet.                  ██▓▒░
-░▒▓██▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄██▓▒░
- ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
-  ░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒'''
-
-# TODO: Scrub this section; reconcile with the loader class above.
-# We really don't need closure-style member protection, here; if a user wants
-# to fuck up our internals, that's on them.
-
-def DynamicScopeLoader(opts=YamletOptions()):
-  loaded_modules = {}
-
-  def LoadCachedFile(fn):
-    fn = fn.resolve()
-    if fn in loaded_modules:
-      res = loaded_modules[fn]
-      if res is None:
-        raise RecursionError(f'Processing config `{fn}` results in recursion. '
-                             'This isn\'t supposed to happen, as import loads '
-                             'are deferred until name lookup.')
-      return res
-    loaded_modules[fn] = None
-    with open(fn) as file: res = ProcessYamlGcl(file)
-    loaded_modules[fn] = res
-    return res
-
-  def GclImport(loader, node):
-    filename = loader.construct_scalar(node)
-    res = ModuleToLoad(filename, YamlPoint(node.start_mark, node.end_mark))
-    res._gcl_loader_ = LoadCachedFile
-    return res
-
-  def ConstructGclDict(loader, node):
-    return ProcessYamlPairs(
-        loader.construct_pairs(node), gcl_opts=opts,
-        yaml_point=YamlPoint(start=node.start_mark, end=node.end_mark))
-
-  def GclComposite(loader, node):
-    marks = YamlPoint(node.start_mark, node.end_mark)
-    if isinstance(node, ruamel.yaml.ScalarNode):
-      return TupleListToComposite(loader.construct_scalar(node).split(), marks)
-    if isinstance(node, ruamel.yaml.SequenceNode):
-      return TupleListToComposite(loader.construct_sequence(node), marks)
-    raise ConstructorError(None, None,
-        f'Yamlet `!composite` got unexpected node type: {repr(node)}',
-        node.start_mark)
-
-  def ScalarNode(tp):
-    def Constructor(loader, node):
-      return tp(loader.construct_scalar(node),
-                YamlPoint(node.start_mark, node.end_mark))
-    return Constructor
-
-  def ConstructConstant(tag, val):
-    def Constructor(loader, node):
-      n = loader.construct_scalar(node)
-      if n != '': raise ConstructorError(None, None,
-          f'Yamlet `!{tag}` got unexpected node type: {repr(node)}',
-          node.start_mark)
-      return val
-    return Constructor
-
-  def ConstructElse(loader, node):
-    marks = YamlPoint(node.start_mark, node.end_mark)
-    if isinstance(node, ruamel.yaml.ScalarNode):
-      s = loader.construct_scalar(node)
-      if s: raise ruamel.yaml.constructor.ConstructorError(
-          None, None,
-          f'A Yamlet `!else` should not have a value attached, '
-          f'but contained {s}', node.start_mark)
-      return YamletElseStatement('', marks)
-    raise ruamel.yaml.constructor.ConstructorError(
-        f'Yamlet `!else` got unexpected node type: {repr(node)}')
-
-  y = YamletLoader(gcl_opts=opts)
-  yc = y.constructor
-  yc.add_constructor(
-      ruamel.yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, ConstructGclDict)
-  yc.add_constructor("!import",    GclImport)
-  yc.add_constructor("!composite", GclComposite)
-  yc.add_constructor("!fmt",       ScalarNode(StringToSubstitute))
-  yc.add_constructor("!expr",      ScalarNode(ExpressionToEvaluate))
-  yc.add_constructor("!lambda",    ScalarNode(GclLambda))
-  yc.add_constructor("!if",        ScalarNode(YamletIfStatement))
-  yc.add_constructor("!elif",      ScalarNode(YamletElifStatement))
-  yc.add_constructor("!else",      ConstructElse)
-  yc.add_constructor("!else:",     ConstructElse)
-  yc.add_constructor("!null",      ConstructConstant('null',     null))
-  yc.add_constructor("!external",  ConstructConstant('external', external))
-
-  def ProcessYamlGcl(ygcl):
-    tup = y.load(ygcl)
-    ectx = _EvalContext(None, opts, tup._yaml_point_,
-                        'Evaluating preprocessors in Yamlet document.')
-    while isinstance(tup, DeferredValue): tup = tup._gcl_resolve_(ectx)
-    _RecursiveUpdateParents(tup, None, opts)
-    return tup
-
-  class Result():
-    def load(self, filename):
-      with open(filename) as fn: return self.loads(fn)
-    def loads(self, yaml_gcl): return ProcessYamlGcl(yaml_gcl)
-  return Result()
 
 
 '''▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░
@@ -1123,7 +1154,9 @@ def _CompositeGclTuples(tuples, ectx):
   res = None
   for t in tuples:
     if t is None: ectx.Raise(ValueError, 'Expression evaluation failed?')
-    if res: res = res.yamlet_clone(ectx.scope)
-    else: res = ectx.NewGclDict()
-    res.yamlet_merge(t, ectx)
+    if res:
+      res = res.yamlet_clone(ectx.scope)
+      res.yamlet_merge(t, ectx)
+    else:
+      res = t.yamlet_clone(ectx.scope)
   return res

@@ -6,29 +6,32 @@ from contextlib import contextmanager
 
 
 def ParameterizedOnOpts(klass):
+  YO = yamlet.YamletOptions
+  YDO = yamlet._DebugOpts
   # Create cloned classes with different Opts
-  def mkclass(name, caching_mode):
+  def mkclass(name, caching_mode, preprocessing=None, traces=None):
     # Dynamically create a new class extending the input ("parameterized") class
     new_class = type(name, (klass,), {})
 
+    debug = YDO(preprocessing=preprocessing, traces=traces)
     def Opts(self, **kwargs):
-      return yamlet.YamletOptions(**kwargs, caching=caching_mode)
-
+      return yamlet.YamletOptions(**kwargs, caching=caching_mode,
+                                  _yamlet_debug_opts=debug)
     new_class.Opts = Opts
     return new_class
 
   # Generate the three versions of the class with different caching modes
-  NoCacheClass = mkclass(f'{klass.__name__}_NoCaching',
-                         yamlet.YamletOptions.CACHE_NOTHING)
-  NormalCacheClass = mkclass(f'{klass.__name__}_DefaultCaching',
-                             yamlet.YamletOptions.CACHE_VALUES)
+  NoCacheClass = mkclass(f'{klass.__name__}_NoCaching', YO.CACHE_NOTHING)
+  NormalCacheClass = mkclass(f'{klass.__name__}_DefCaching', YO.CACHE_VALUES)
   DebugCacheClass = mkclass(f'{klass.__name__}_DebugCaching',
-                            yamlet.YamletOptions.CACHE_DEBUG)
+                            YO.CACHE_DEBUG, traces=YDO.TRACE_PRETTY)
+  DebugAllClass = mkclass(f'{klass.__name__}_DebugAll',
+                          YO.CACHE_DEBUG, YDO.PREPROCESS_EVERYTHING)
 
   # Add the new classes to the global scope for unittest to pick up
-  globals()[NoCacheClass.__name__] = NoCacheClass
-  globals()[NormalCacheClass.__name__] = NormalCacheClass
-  return DebugCacheClass
+  for test_derivative in [NoCacheClass, NormalCacheClass, DebugCacheClass]:
+    globals()[test_derivative.__name__] = test_derivative
+  return DebugAllClass
 
 
 @ParameterizedOnOpts
@@ -92,7 +95,7 @@ class TestTupleCompositing(unittest.TestCase):
       - t2 t3
     comp3: !expr t1 t2 t3
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     for compn in ['comp1', 'comp2', 'comp3']:
       self.assertTrue(compn in y)
@@ -119,7 +122,7 @@ class TestTupleCompositing(unittest.TestCase):
         val: all you happy people
       }
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     self.assertEqual(y['t1']['deferred'], 'Hello, world!')
     self.assertEqual(y['t2']['deferred'], 'Hello, all you happy people!')
@@ -135,7 +138,7 @@ class TestTupleCompositing(unittest.TestCase):
         val: world
       }
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     self.assertEqual(y['t2']['sub']['deferred'], 'Hello, world!')
 
@@ -158,7 +161,7 @@ class TestTupleCompositing(unittest.TestCase):
         val: world
       }
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     self.assertEqual(y['t2']['sub']['deferred'], 'Hello, world!')
 
@@ -170,7 +173,7 @@ class TestTupleCompositing(unittest.TestCase):
       val: world
       sub: !expr t1
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     self.assertEqual(y['t2']['sub']['deferred'], 'Hello, world!')
 
@@ -183,7 +186,7 @@ class TestTupleCompositing(unittest.TestCase):
       sub: !composite
         - t1
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     self.assertEqual(y['t2']['sub']['deferred'], 'Hello, world!')
 
@@ -200,7 +203,7 @@ class TestTupleCompositing(unittest.TestCase):
       d: !external
     t3: !expr t1 t2
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     self.assertEqual(len(y['t1']), 4)
     self.assertEqual(len(y['t2']), 3)
@@ -215,7 +218,7 @@ class TestTupleCompositing(unittest.TestCase):
         v: !external
         exp: !expr v
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     with AssertRaisesCleanException(self, ValueError):
       val = y['t1']['sub']['exp']
@@ -229,7 +232,7 @@ class TestTupleCompositing(unittest.TestCase):
         v: !null
         exp: !expr v
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     self.assertEqual( y['t1']['sub']['exp'], 'value')
 
@@ -249,7 +252,7 @@ class TestInheritance(unittest.TestCase):
           a: four
           counting: !fmt '{up.super.a} {super.a} {up.a} {a}'
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     self.assertEqual(y['t2']['sub']['counting'], 'one two three four')
 
@@ -259,7 +262,7 @@ class TestInheritance(unittest.TestCase):
       a: !expr up.x
       x: an actual value
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     with AssertRaisesCleanException(self, KeyError):
         val = y['t']['a']
@@ -274,7 +277,7 @@ class TestStringMechanics(unittest.TestCase):
     v2: world
     v3: !fmt '{{{v}}}, {{{{{v2}}}}}{{s}}!'
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     self.assertEqual(y['v3'], '{Hello}, {{world}}{s}!')
 
@@ -294,7 +297,7 @@ class TestFunctions(unittest.TestCase):
       side_effect.append(x)
       return uniq
 
-    loader = yamlet.DynamicScopeLoader(self.Opts(functions={'func': func}))
+    loader = yamlet.Loader(self.Opts(functions={'func': func}))
     y = loader.loads(YAMLET)
     self.assertTrue(y['t']['v'] is uniq)
     self.assertEqual(side_effect, ['Hello, ', ['world!']])
@@ -313,7 +316,7 @@ class TestConditionals(unittest.TestCase):
       - t1
       - { blocked: False }
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     self.assertEqual(y['t2']['color'], 'red')
     self.assertEqual(y['t3']['color'], 'green')
@@ -336,7 +339,7 @@ class TestConditionals(unittest.TestCase):
       - t1
       - { blocked: False }
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     self.assertEqual(y['t2']['conditionals']['color'], 'red')
     self.assertEqual(y['t2']['conditionals']['val'], 'Color: red')
@@ -367,7 +370,7 @@ class TestConditionals(unittest.TestCase):
     t4: !expr |
         t0 { animal: 'squirrel' }
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     self.assertEqual(y['t1']['diet'], 'meat')
     self.assertEqual(y['t2']['action'], 'pats')
@@ -409,7 +412,7 @@ class TestConditionals(unittest.TestCase):
     t4: !expr |
         t0 { animal: 'squirrel' }
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     self.assertEqual(y['t1'].evaluate_fully(), {
         'animal': 'cat',
@@ -446,7 +449,7 @@ class TestConditionals(unittest.TestCase):
     !else :
       crapagain: 2
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     self.assertTrue('a' in y)
     self.assertTrue('b' in y)
@@ -475,7 +478,7 @@ class TestConditionals(unittest.TestCase):
       !else :
         b: { bb: 12 }
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     self.assertTrue('a' in y['t'])
     self.assertTrue('b' in y['t'])
@@ -517,7 +520,7 @@ class TestConditionals(unittest.TestCase):
         t1 { outer: 'C', inner: 'X' }
     '''
 
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
 
     # Check for various nested conditions
@@ -583,7 +586,7 @@ class TestConditionals(unittest.TestCase):
     cx1: !composite [tp, {first: 'C', middle: 'X', last: 1}]
     '''
 
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
 
     # Check for various nested conditions
@@ -615,7 +618,7 @@ class TestConditionals(unittest.TestCase):
       food: kibble
     '''
     fuzzy = FuzzyAnimalComparator()
-    loader = yamlet.DynamicScopeLoader(self.Opts(globals={'fuzzy': fuzzy}))
+    loader = yamlet.Loader(self.Opts(globals={'fuzzy': fuzzy}))
 
     fuzzy.animal = 'hamster'
     y = loader.loads(YAMLET)
@@ -670,8 +673,14 @@ class AssertRaisesCleanException:
       # Let other exceptions pass through
       return False
 
-    # Handle the expected exception
-    ex = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    format_exc = traceback.format_exception(exc_type, exc_value, exc_traceback)
+    cut_from = 0
+    for i, line in enumerate(format_exc):
+      if ("The above exception was the direct cause of the following exception:"
+          in line or
+          "During handling of the above exception, another exception occurred:"
+          in line): cut_from = i + 1
+    ex = ''.join(format_exc[cut_from:])
     tb = traceback.format_tb(exc_traceback)
 
     exlines = ex.splitlines()
@@ -696,6 +705,63 @@ class AssertRaisesCleanException:
 
 
 @ParameterizedOnOpts
+class TestFlatCompositing(unittest.TestCase):
+  class RelativeStringValue(yamlet.Compositable):
+    def __init__(self, loader_or_str, node_if_loader=None):
+      if node_if_loader:
+        self.val = str(loader_or_str.construct_scalar(node_if_loader))
+      else:
+        self.val = loader_or_str
+
+    def yamlet_merge(self, other, ectx):
+      if isinstance(other, str): self.val = f'{self.val} {other}'.strip()
+      elif isinstance(other, TestFlatCompositing.RelativeStringValue):
+        self.val = f'{self.val} {other.val}'.strip()
+      else: ectx.Raise(
+          f'Cannot composite {type(other).__name__} with RelativeStringValue')
+
+    def yamlet_clone(self, other):
+      return TestFlatCompositing.RelativeStringValue(self.val)
+
+    def __eq__(self, other):
+      if isinstance(other, str): return self.val == other
+      return self.val == other.val
+
+  def test_specializing_conditions(self):
+    YAMLET = '''# Yamlet
+    tp:
+      variable: defaulted value
+      switch: off
+      !if switch == 'on':
+        variable: specialized value
+    boring: !expr tp
+    flashy: !expr tp {switch:'on'}
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.loads(YAMLET)
+    self.assertEqual(y['tp']['variable'], 'defaulted value')
+    self.assertEqual(y['flashy']['variable'], 'specialized value')
+    self.assertEqual(y['boring']['variable'], 'defaulted value')
+
+  def test_specializing_conditions(self):
+    YAMLET = '''# Yamlet
+    tp:
+      variable: !rel defaulted value
+      switch: off
+      !if switch == 'on':
+        variable: !rel specialized value
+    boring: !expr tp
+    flashy: !expr tp {switch:'on'}
+    '''
+    ctors = {'!rel': TestFlatCompositing.RelativeStringValue}
+    loader = yamlet.Loader(self.Opts(constructors=ctors))
+    y = loader.loads(YAMLET)
+    self.assertEqual(y['tp']['variable'], 'defaulted value')
+    self.assertEqual(y['flashy']['variable'], 'defaulted value specialized value')
+    self.assertEqual(y['boring']['variable'], 'defaulted value')
+
+
+@ParameterizedOnOpts
 class TestRecursion(unittest.TestCase):
   def test_recursion(self):
     YAMLET = '''# Yamlet
@@ -703,7 +769,7 @@ class TestRecursion(unittest.TestCase):
       a: !expr b
       b: !expr a
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     with AssertRaisesCleanException(self, RecursionError):
       val = y['recursive']['a']
@@ -721,7 +787,7 @@ class TestRecursion(unittest.TestCase):
       - parent
       - childvalue: !expr parentvalue != 'blue'
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     with AssertRaisesCleanException(self, RecursionError, max_context=40):
       val = y['child']['parentvalue']
@@ -745,7 +811,7 @@ class GptsTestIdeas(unittest.TestCase):
             a: override
             test: !fmt '{up.up.super.a} {up.a} {super.a} {a}'
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     self.assertEqual(y['t2']['sub']['subsub']['test'], 'base level1 level2 override')
 
@@ -763,8 +829,9 @@ class GptsTestIdeas(unittest.TestCase):
         d: !null
     t3: !expr t1 t2
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
+    self.assertFalse(isinstance(y['t3']['sub'], yamlet.DeferredValue))
     self.assertEqual(y['t3'], {'b': 'boy', 'sub': {'c': 'cat'}})
 
   def test_nested_super_override(self):
@@ -777,7 +844,7 @@ class GptsTestIdeas(unittest.TestCase):
           a: final
           result: !fmt '{up.a} {up.up.a} {a}'
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     self.assertEqual(y['t1']['sub']['subsub']['result'], 'intermediate original final')
 
@@ -785,7 +852,7 @@ class GptsTestIdeas(unittest.TestCase):
     YAMLET = '''# Yamlet
     a: !expr up.a
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     with AssertRaisesCleanException(self, ValueError):
         val = y['a']
@@ -798,7 +865,7 @@ class GptsTestIdeas(unittest.TestCase):
       sub:
         a: !expr super.a
     '''
-    loader = yamlet.DynamicScopeLoader(self.Opts())
+    loader = yamlet.Loader(self.Opts())
     y = loader.loads(YAMLET)
     with AssertRaisesCleanException(self, ValueError):
         val = y['t1']['sub']['a']
