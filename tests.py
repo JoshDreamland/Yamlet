@@ -4,7 +4,6 @@ import yamlet
 
 from contextlib import contextmanager
 
-
 def ParameterizedOnOpts(klass):
   YO = yamlet.YamletOptions
   YDO = yamlet._DebugOpts
@@ -32,6 +31,12 @@ def ParameterizedOnOpts(klass):
   for test_derivative in [NoCacheClass, NormalCacheClass, DebugCacheClass]:
     globals()[test_derivative.__name__] = test_derivative
   return DebugAllClass
+
+
+def DefaultConfigOnly(klass):
+  def Opts(self, **kwargs): return yamlet.YamletOptions(**kwargs)
+  klass.Opts = Opts
+  return klass
 
 
 @ParameterizedOnOpts
@@ -670,6 +675,7 @@ class TestConditionals(unittest.TestCase):
 
 
 @ParameterizedOnOpts
+# If this is causing CPU headache, change to @DefaultConfigOnly
 class TestStress(unittest.TestCase):
   def test_utter_insanity(self):
     YAMLET = '''# Yamlet
@@ -684,7 +690,7 @@ class TestStress(unittest.TestCase):
       !elif number > 100:
         name: !fmt '{lead.name} hundred{space}{remainder.name}'
         lead: !expr |
-            name_number { number: int(up.number / 100) }
+            name_number { number: up.number // 100 }
         space: !expr cond(lead and remainder.name, ' ', '')
         remainder: !expr |
             name_number { number: up.number % 100 }
@@ -692,7 +698,7 @@ class TestStress(unittest.TestCase):
         name: !fmt '{lead}{hyphen}{remainder.name}'
         lead: !expr |
             ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty',
-            'seventy', 'eighty', 'ninety'][int(number / 10)]
+            'seventy', 'eighty', 'ninety'][int(number / 10)]  # Just2B different
         hyphen: !expr cond(lead and remainder.name, '-', '')
         remainder: !expr |
             name_number { number: up.number % 10 }
@@ -849,9 +855,10 @@ class TestRecursion(unittest.TestCase):
         parentvalue: 'red'
       !else :
         parentvalue: 'blue'
-    child: !composite
-      - parent
-      - childvalue: !expr parentvalue != 'blue'
+    child: !expr |
+      parent {
+        childvalue: parentvalue != 'blue'
+      }
     '''
     loader = yamlet.Loader(self.Opts())
     y = loader.load(YAMLET)
@@ -966,10 +973,94 @@ class RunExample(unittest.TestCase):
     assertLenGreater(t['childtuple2'].explain_value('beans'), 50)
 
 
+  def test_top_example_from_the_readme(self):
+    YAMLET = '''# Yamlet
+    key1: my common value
+    key2: !expr key1 + ' my extra specialized value'
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['key2'], 'my common value my extra specialized value')
+
+  def test_platform_example_from_the_readme(self):
+    YAMLET = '''# Yamlet
+    !if platform == 'Windows':
+      directory_separator: \\
+      executable_extension: exe
+      dylib_extension: dll
+    !elif platform == 'Linux':
+      directory_separator: /
+      executable_extension: null
+      dylib_extension: so
+    !else:
+      directory_separator: /
+      executable_extension: bin
+      dylib_extension: dylib
+    '''
+    loader = yamlet.Loader(self.Opts(globals={'platform': 'Windows'}))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['directory_separator'], '\\')
+    self.assertEqual(y['executable_extension'], 'exe')
+    self.assertEqual(y['dylib_extension'], 'dll')
+
+    loader = yamlet.Loader(self.Opts(globals={'platform': 'Linux'}))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['directory_separator'], '/')
+    self.assertEqual(y['executable_extension'], None)
+    self.assertEqual(y['dylib_extension'], 'so')
+
+    loader = yamlet.Loader(self.Opts(globals={'platform': 'Who knows'}))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['directory_separator'], '/')
+    self.assertEqual(y['executable_extension'], 'bin')
+    self.assertEqual(y['dylib_extension'], 'dylib')
+
+  def test_other_example_from_the_readme(self):
+    YAMLET = '''# Yamlet
+    my_yamlet_map: !expr |
+      {
+        key: 'my string value with {inlined} {expressions}',
+        otherkey: 'my other value'
+      }
+    '''
+    loader = yamlet.Loader(self.Opts(globals={
+        'inlined': 'inlined', 'expressions': 'expressions'}))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['my_yamlet_map']['key'],
+                     'my string value with inlined expressions')
+    self.assertEqual(y['my_yamlet_map']['otherkey'], 'my other value')
+
+  def test_fruit_example_from_the_readme(self):
+    YAMLET = '''# Yamlet
+    tuple_A:
+      fruit: Apple
+      tuple_B:
+        fruit: Banana
+        value: !fmt '{up.fruit} {fruit}'
+    tuple_C: !expr |
+      tuple_A {
+        tuple_B: {
+          fruit: 'Blueberry',
+          value2: '{super.up.fruit} {super.fruit} {fruit} {up.fruit}',
+          value3: '{super.value}  -vs-  {value}',
+        },
+        fruit: 'Cherry'
+      }
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['tuple_A']['fruit'], 'Apple')
+    self.assertEqual(y['tuple_A']['tuple_B']['fruit'], 'Banana')
+    self.assertEqual(y['tuple_C']['fruit'], 'Cherry')
+    self.assertEqual(y['tuple_C']['tuple_B']['fruit'], 'Blueberry')
+
+    self.assertEqual(y['tuple_A']['tuple_B']['value'], 'Apple Banana')
+    self.assertEqual(y['tuple_C']['tuple_B']['value2'],
+                     'Apple Banana Blueberry Cherry')
+    self.assertEqual(y['tuple_C']['tuple_B']['value3'],
+                     'Apple Banana  -vs-  Cherry Blueberry')
+    self.assertEqual(y['tuple_C']['tuple_B']['value'], 'Cherry Blueberry')
+
+
 if __name__ == '__main__':
-  CACHE_MODE = yamlet.YamletOptions.CACHE_DEBUG
-  unittest.main()
-  CACHE_MODE = yamlet.YamletOptions.CACHE_NOTHING
-  unittest.main()
-  CACHE_MODE = yamlet.YamletOptions.CACHE_VALUES
   unittest.main()

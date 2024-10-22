@@ -1100,7 +1100,6 @@ def _GclNameLookup(name, ectx):
 
 
 def _GclExprEval(expr, ectx):
-  _DebugPrint(f'Evaluate: {expr}')
   return _EvalGclAst(_ParseIntoChunks(expr), ectx)
 
 
@@ -1209,10 +1208,17 @@ def _EvalGclAst(et, ectx):
         ectx.Raise(
             KeyError,
             'Yamlet keys should be names or strings. Got:\n{ast.dump(et)}')
+      children = []
       def DeferAst(v):
+        if isinstance(v, ast.Dict):
+          v = ev(v)
+          children.append(v)
+          return v
         return ExpressionToEvaluate(ast.unparse(v), ectx.GetPoint())
-      return ectx.NewGclDict({EvalKey(k): DeferAst(v)
-                              for k,v in zip(et.keys, et.values)})
+      res = ectx.NewGclDict({EvalKey(k): DeferAst(v)
+                             for k,v in zip(et.keys, et.values)})
+      for c in children: c._gcl_parent_ = res
+      return res
   ectx.Raise(NotImplementedError,
              f'Undefined Yamlet operation `{type(et)}`:\n{ast.dump(et)}')
 
