@@ -1,3 +1,6 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+
 import ast
 import copy
 import io
@@ -14,7 +17,6 @@ class YamletBaseException(Exception): pass
 
 class YamletOptions:
   Error = ['error']
-
   CACHE_VALUES = 1
   CACHE_NOTHING = 2
   CACHE_DEBUG = 3
@@ -276,7 +278,7 @@ class GclDict(dict, Compositable):
     obj = super().__getitem__(k)
     if isinstance(obj, DeferredValue):
       if not obj._gcl_provenance_:
-        return f'`{k}` has not been evaluated,{obj._yaml_point_.start}'
+        return f'`{k}` has not been evaluated; defined {_TuplePointStr(obj)}'
       return obj._gcl_provenance_.ExplainUp(_prep = f'`{k}` was computed from')
     inherited = self._gcl_provenances_.get(k)
     if inherited:
@@ -570,7 +572,6 @@ class ModuleToLoad(DeferredValue):
   def _gcl_evaluate_(self, value, ectx):
     fn = _ResolveStringValue(value, ectx)
     fn = pathlib.Path(ectx.opts.import_resolver(fn))
-    _DebugPrint(f'Load the following module: {fn}')
     if not fn.exists():
       if value == fn:
         ectx.Raise(FileNotFoundError,
@@ -579,7 +580,6 @@ class ModuleToLoad(DeferredValue):
                  f'Could not import YamlBcl file: `{fn}`\n'
                  f'As evaluated from this expression: `{value}`.\n')
     loaded = self._gcl_loader_(fn)
-    _DebugPrint('Loaded:\n', loaded)
     return loaded
 
 
@@ -691,7 +691,7 @@ class GclLambda:
   '''GclLambda isn't actually a DeferredValue, but they appear similar in YAML.
 
   The glass actually provides an interface to make itself callable, and the
-  `_EvalGclAst` checks for its type directly before raising that an object
+  `EvalGclAst` checks for its type directly before raising that an object
   is not callable.
   '''
   def __init__(self, expr, yaml_point):
@@ -884,10 +884,6 @@ class YamletIfElseLadder(PreprocessingDirective):
     return other
 
 
-def _DebugPrint(*args, **kwargs): pass #print(*args, **kwargs)
-def _GclWarning(*args, **kwargs): print(*args, file=sys.stderr, **kwargs)
-
-
 def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point):
   filtered_pairs = {}
   preprocessors = {}
@@ -971,7 +967,7 @@ def _TuplePointStr(tup):
   return str(tup._yaml_point_.start).lstrip()
 
 
-def _ParseIntoChunks(expr):
+def _InsertCompositOperators(expr):
   tokens = tokenize.tokenize(io.BytesIO(expr.encode('utf-8')).readline)
   token_blocks = []
   cur_tokens = []
@@ -1026,7 +1022,6 @@ def _ResolveStringValue(val, ectx):
           dclose = True
 
   res += val[j:]
-  _DebugPrint(f'Formatted string: {res}')
   return res
 
 
@@ -1042,7 +1037,6 @@ def _CompositeYamlTupleList(tuples, ectx):
   ectx.Assert(isinstance(tuples, list),
               f'Expected list of tuples to composite; got {type(tuples)}')
   ectx.Assert(tuples, 'Attempting to composite empty list of tuples')
-  _DebugPrint(f'Composite the following tuples: {tuples}')
   for i, t in enumerate(tuples):
     if isinstance(t, DeferredValue): tuples[i] = t._gcl_resolve_(ectx)
     elif isinstance(t, str): tuples[i] = _GclExprEval(t, ectx)
@@ -1061,13 +1055,19 @@ def _CompositeYamlTupleList(tuples, ectx):
  ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
   ░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒'''
 
+
+class ArgumentDeferringFunction:
+  def __init__(self, func): self.func = func
+  def __call__(self, ectx, *args, **kwargs):
+    return self.func(ectx, *args, **kwargs)
+
+
 def _BuiltinFuncsMapper():
-  def cond(condition, if_true, if_false):
-    return if_true if condition else if_false
-  return {
-    'cond': cond, 'len': len,
-    'int': int, 'float': float, 'str': str,
-  }
+  @ArgumentDeferringFunction
+  def cond(ectx, condition, if_true, if_false):
+    return (EvalGclAst(if_true, ectx) if EvalGclAst(condition, ectx)
+            else EvalGclAst(if_false, ectx))
+  return { 'cond': cond, 'len': len, 'int': int, 'float': float, 'str': str }
 _BUILTIN_FUNCS = _BuiltinFuncsMapper()
 
 
@@ -1100,11 +1100,11 @@ def _GclNameLookup(name, ectx):
 
 
 def _GclExprEval(expr, ectx):
-  return _EvalGclAst(_ParseIntoChunks(expr), ectx)
+  return EvalGclAst(_InsertCompositOperators(expr), ectx)
 
 
-def _EvalGclAst(et, ectx):
-  ev = lambda x: _EvalGclAst(x, ectx)
+def EvalGclAst(et, ectx):
+  ev = lambda x: EvalGclAst(x, ectx)
   match type(et):
     case ast.Expression: return ev(et.body)
     case ast.Name: return _GclNameLookup(et.id, ectx)
@@ -1139,28 +1139,19 @@ def _EvalGclAst(et, ectx):
       for op, r in zip(et.ops, et.comparators):
         r = ev(r)
         match type(op):
-          case ast.Eq:
-            if l != r: return False
-          case ast.NotEq:
-            if l == r: return False
-          case ast.Lt:
-            if l >= r: return False
-          case ast.LtE:
-            if l > r: return False
-          case ast.Gt:
-            if l <= r: return False
-          case ast.GtE:
-            if l < r: return False
-          case ast.Is:
-            if l is not r: return False
-          case ast.IsNot:
-            if l is r: return False
-          case ast.In:
-            if l not in r: return False
-          case ast.NotIn:
-            if l in r: return False
+          case ast.Eq:     v = l == r
+          case ast.NotEq:  v = l != r
+          case ast.Lt:     v = l < r
+          case ast.LtE:    v = l <= r
+          case ast.Gt:     v = l > r
+          case ast.GtE:    v = l >= r
+          case ast.Is:     v = l is r
+          case ast.IsNot:  v = l is not r
+          case ast.In:     v = l in r
+          case ast.NotIn:  v = l not in r
           case _: ectx.Raise(NotImplementedError,
                              f'UnKnown comparison operator `{op}`.')
+        if not v: return False
         l = r
       return True
     case ast.BoolOp:
@@ -1177,6 +1168,8 @@ def _EvalGclAst(et, ectx):
         case _: ectx.Raise(NotImplementedError,
                            f'Unknown boolean operator `{op}`.')
       return v
+    case ast.IfExp:
+      return ev(et.body) if ev(et.test) else ev(et.orelse)
     case ast.Call:
       fun, fun_name = None, None
       if isinstance(et.func, ast.Name):
@@ -1184,12 +1177,15 @@ def _EvalGclAst(et, ectx):
         if fun_name in ectx.opts.functions: fun = ectx.opts.functions[fun_name]
         elif fun_name in _BUILTIN_FUNCS: fun = _BUILTIN_FUNCS[fun_name]
       if not fun:
-        fun = _EvalGclAst(et.func, ectx)
+        fun = EvalGclAst(et.func, ectx)
       if isinstance(fun, GclLambda): fun = fun.Callable(fun_name, ectx)
       if not callable(fun): ectx.Raise(
           TypeError, f'`{fun_name or ast.unparse(et.func)}` is not a function.')
-      fun_args = [_EvalGclAst(arg, ectx) for arg in et.args]
-      fun_kwargs = {kw.arg: _EvalGclAst(kw.value, ectx) for kw in et.keywords}
+      fun_args, fun_kwargs = et.args, {kw.arg: kw.value for kw in et.keywords}
+      if isinstance(fun, ArgumentDeferringFunction):
+        return fun(ectx, *fun_args, **fun_kwargs)
+      fun_args = [EvalGclAst(arg, ectx) for arg in fun_args]
+      fun_kwargs = {k: EvalGclAst(v, ectx) for k, v in fun_kwargs.items()}
       return fun(*fun_args, **fun_kwargs)
     case ast.Subscript:
       v = ev(et.value)
@@ -1205,9 +1201,8 @@ def _EvalGclAst(et, ectx):
         if isinstance(k, ast.Constant):
           if isinstance(et.value, str):
             return _ResolveStringValue(et.value, ectx)
-        ectx.Raise(
-            KeyError,
-            'Yamlet keys should be names or strings. Got:\n{ast.dump(et)}')
+        ectx.Raise(KeyError, 'Yamlet keys should be names or strings. '
+                             f'Got {type(et).__name__}')
       children = []
       def DeferAst(v):
         if isinstance(v, ast.Dict):
@@ -1220,7 +1215,7 @@ def _EvalGclAst(et, ectx):
       for c in children: c._gcl_parent_ = res
       return res
   ectx.Raise(NotImplementedError,
-             f'Undefined Yamlet operation `{type(et)}`:\n{ast.dump(et)}')
+             f'Undefined Yamlet operation `{type(et).__name__}`')
 
 
 def _CompositeGclTuples(tuples, ectx):

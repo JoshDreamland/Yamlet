@@ -1,3 +1,4 @@
+import os
 import traceback
 import unittest
 import yamlet
@@ -38,6 +39,13 @@ def DefaultConfigOnly(klass):
   klass.Opts = Opts
   return klass
 
+def active(v):
+  if not v: return False
+  return v.lower() in {'on', 'yes', 'true', 'full'}
+
+ParameterizedForStress = (
+    ParameterizedOnOpts if active(os.getenv('yamlet_stress'))
+    else DefaultConfigOnly)
 
 @ParameterizedOnOpts
 class TestTupleCompositing(unittest.TestCase):
@@ -221,6 +229,69 @@ class TestTupleCompositing(unittest.TestCase):
     loader = yamlet.Loader(self.Opts())
     y = loader.load(YAMLET)
     self.assertEqual(y['val'], 5)
+
+  def test_overriding_inherited_tuples(self):
+    YAMLET = '''# YAMLET
+    t1:
+      shared_key: Value that appears in both tuples
+      sub:
+        t1_only_key: Value that only appears in t1
+        t1_only_key2: Second value that only appears in t1
+      sub2:
+        shared_key2: Nested value in both
+
+    t2: !composite
+      - t1
+      - t2_only_key: Value that only appears in t2
+        sub: !expr |
+            { t2_only_key2: 'Second value that only appears in t1' }
+        sub2:
+          t2_only_key3: Nested value only in t2
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['t1']['shared_key'], 'Value that appears in both tuples')
+    self.assertEqual(y['t2']['shared_key'], 'Value that appears in both tuples')
+    self.assertEqual(y['t1']['sub'].keys(), {'t1_only_key', 't1_only_key2'})
+    self.assertEqual(y['t2']['sub'].keys(), {'t2_only_key2'})
+    self.assertEqual(y['t1']['sub2']['shared_key2'], 'Nested value in both')
+    self.assertEqual(y['t2']['sub2']['shared_key2'], 'Nested value in both')
+    self.assertEqual(y['t2']['sub2']['t2_only_key3'], 'Nested value only in t2')
+    self.assertEqual(y['t1']['sub2'].keys(), {'shared_key2'})
+    self.assertEqual(y['t2']['sub2'].keys(), {'shared_key2', 't2_only_key3'})
+
+  def test_overriding_inherited_tuples_with_ugliness(self):
+    YAMLET = '''# YAMLET
+    t1:
+      shared_key: Value that appears in both tuples
+      sub:
+        t1_only_key: Value that only appears in t1
+        t1_only_key2: Second value that only appears in t1
+      sub2:
+        shared_key2: Nested value in both
+
+    t2: !expr |
+      t1 {
+          t2_only_key: 'Value that only appears in t2',
+          sub: [{
+            t2_only_key2: 'Second value that only appears in t1'
+          }][0],
+          sub2: {
+            t2_only_key3: 'Nested value only in t2'
+          }
+      }
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['t1']['shared_key'], 'Value that appears in both tuples')
+    self.assertEqual(y['t2']['shared_key'], 'Value that appears in both tuples')
+    self.assertEqual(y['t1']['sub'].keys(), {'t1_only_key', 't1_only_key2'})
+    self.assertEqual(y['t2']['sub'].keys(), {'t2_only_key2'})
+    self.assertEqual(y['t1']['sub2']['shared_key2'], 'Nested value in both')
+    self.assertEqual(y['t2']['sub2']['shared_key2'], 'Nested value in both')
+    self.assertEqual(y['t2']['sub2']['t2_only_key3'], 'Nested value only in t2')
+    self.assertEqual(y['t1']['sub2'].keys(), {'shared_key2'})
+    self.assertEqual(y['t2']['sub2'].keys(), {'shared_key2', 't2_only_key3'})
 
   def test_nullification(self):
     YAMLET = '''# YAMLET
@@ -674,8 +745,7 @@ class TestConditionals(unittest.TestCase):
     self.assertEqual(y.keys(), {'food'})
 
 
-@ParameterizedOnOpts
-# If this is causing CPU headache, change to @DefaultConfigOnly
+@ParameterizedForStress
 class TestStress(unittest.TestCase):
   def test_utter_insanity(self):
     YAMLET = '''# Yamlet
@@ -972,7 +1042,6 @@ class RunExample(unittest.TestCase):
     assertLenGreater(t['childtuple'].explain_value('beans'),  50)
     assertLenGreater(t['childtuple2'].explain_value('beans'), 50)
 
-
   def test_top_example_from_the_readme(self):
     YAMLET = '''# Yamlet
     key1: my common value
@@ -1015,7 +1084,7 @@ class RunExample(unittest.TestCase):
     self.assertEqual(y['executable_extension'], 'bin')
     self.assertEqual(y['dylib_extension'], 'dylib')
 
-  def test_other_example_from_the_readme(self):
+  def test_yamlet_mapping_example_from_the_readme(self):
     YAMLET = '''# Yamlet
     my_yamlet_map: !expr |
       {
@@ -1029,6 +1098,49 @@ class RunExample(unittest.TestCase):
     self.assertEqual(y['my_yamlet_map']['key'],
                      'my string value with inlined expressions')
     self.assertEqual(y['my_yamlet_map']['otherkey'], 'my other value')
+
+  def test_string_formatting_examples_from_the_readme(self):
+    YAMLET = '''# Yamlet
+    subject: world
+    str1: !expr ('Hello, {subject}!')
+    str2: !expr ('Hello, ' + subject + '!')
+    str3: !fmt 'Hello, {subject}!'
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['str1'], 'Hello, world!')
+    self.assertEqual(y['str2'], 'Hello, world!')
+    self.assertEqual(y['str3'], 'Hello, world!')
+
+  def test_composition_examples_from_the_readme(self):
+    YAMLET = '''# Yamlet
+    parent_tuple:
+      old_key: old value
+    child_tuple_A: !expr |
+      parent_tuple {
+        new_key: 'new value',  # Python dicts and YAML flow mappings...
+        old_key: 'new overriding value',  # String values must be quoted...
+      }
+    child_tuple_B: !composite
+      - parent_tuple  # The raw name of the parent tuple to composite
+      - new_key: new value  # This is a mapping block inside a sequence block!
+        old_key: new overriding value  # Note that normal YAML `k: v` is fine.
+    child_tuple_C: !composite
+      - parent_tuple  # The raw name of the parent tuple to composite
+      - {
+        new_key: new value,  # A comma is now required here!
+        old_key: new overriding value  # Plain style is still allowed.
+      }
+    '''
+    loader = yamlet.Loader(self.Opts(globals={
+        'inlined': 'inlined', 'expressions': 'expressions'}))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['child_tuple_A']['new_key'], 'new value')
+    self.assertEqual(y['child_tuple_A']['old_key'], 'new overriding value')
+    self.assertEqual(y['child_tuple_B']['new_key'], 'new value')
+    self.assertEqual(y['child_tuple_B']['old_key'], 'new overriding value')
+    self.assertEqual(y['child_tuple_C']['new_key'], 'new value')
+    self.assertEqual(y['child_tuple_C']['old_key'], 'new overriding value')
 
   def test_fruit_example_from_the_readme(self):
     YAMLET = '''# Yamlet
@@ -1060,6 +1172,29 @@ class RunExample(unittest.TestCase):
     self.assertEqual(y['tuple_C']['tuple_B']['value3'],
                      'Apple Banana  -vs-  Cherry Blueberry')
     self.assertEqual(y['tuple_C']['tuple_B']['value'], 'Cherry Blueberry')
+
+  def test_lambda_example_from_the_readme(self):
+    YAMLET = '''# Yamlet
+    add_two_numbers: !lambda |
+                     x, y: x + y
+    name_that_shape: !lambda |
+       x: cond(x < 13, ['point', 'line', 'plane', 'triangle',
+               'quadrilateral', 'pentagon', 'hexagon', 'heptagon', 'octagon',
+               'nonagon', 'decagon', 'undecagon', 'dodecagon'][x], '{x}-gon')
+    is_thirteen: !lambda |
+                 x: 'YES!!!' if x is 13 else 'no'
+    five_plus_seven:      !expr add_two_numbers(5, 7)
+    shape_with_4_sides:   !expr name_that_shape(4)
+    shape_with_14_sides:  !expr name_that_shape(14)
+    seven_is_thirteen:    !expr is_thirteen(7)
+    thirteen_is_thirteen: !expr is_thirteen(13)
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['five_plus_seven'], 12)
+    self.assertEqual(y['shape_with_4_sides'], 'quadrilateral')
+    self.assertEqual(y['seven_is_thirteen'], 'no')
+    self.assertEqual(y['thirteen_is_thirteen'], 'YES!!!')
 
 
 if __name__ == '__main__':
