@@ -1,5 +1,7 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
+# Copyright (C) 2024 Josh Ventura <joshv10>
+# You may use and redistribute this file under the terms of the MIT License.
 
 import ast
 import copy
@@ -12,6 +14,7 @@ import sys
 import token
 import tokenize
 
+VERSION = '0.0.1.A'
 ConstructorError = ruamel.yaml.constructor.ConstructorError
 class YamletBaseException(Exception): pass
 
