@@ -1,3 +1,6 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+
 import os
 import traceback
 import unittest
@@ -1195,6 +1198,32 @@ class RunExample(unittest.TestCase):
     self.assertEqual(y['shape_with_4_sides'], 'quadrilateral')
     self.assertEqual(y['seven_is_thirteen'], 'no')
     self.assertEqual(y['thirteen_is_thirteen'], 'YES!!!')
+
+  def test_func_example_from_the_readme(self):
+    YamletOptions = self.Opts
+    loader = yamlet.Loader(YamletOptions(functions={
+        'quadratic': lambda a, b, c: (-b + (b * b - 4 * a * c)**.5) / (2 * a)
+    }))
+    data = loader.load('''
+        a: 2
+        b: !expr a + c  # Evaluates to 9, eventually
+        c: 7
+        quad: !expr quadratic(a, b, c)
+        ''')
+    self.assertEqual(data['quad'], -1)
+    self.assertEqual(data['a'], 2)
+    self.assertEqual(data['b'], 9)
+    self.assertEqual(data['c'], 7)
+
+  def test_dynamic_key_example_from_the_readme(self):
+    YAMLET = '''# Yamlet
+    static_key: dynamic
+    tup: !expr |
+      { '{static_key}_key': 'value' }
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['tup'].keys(), {'dynamic_key'})
 
 
 if __name__ == '__main__':

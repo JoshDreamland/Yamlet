@@ -1199,8 +1199,8 @@ def EvalGclAst(et, ectx):
       def EvalKey(k):
         if isinstance(k, ast.Name): return k.id
         if isinstance(k, ast.Constant):
-          if isinstance(et.value, str):
-            return _ResolveStringValue(et.value, ectx)
+          if isinstance(k.value, str):
+            return _ResolveStringValue(k.value, ectx)
         ectx.Raise(KeyError, 'Yamlet keys should be names or strings. '
                              f'Got {type(et).__name__}')
       children = []
