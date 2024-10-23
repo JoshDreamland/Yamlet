@@ -61,10 +61,12 @@ for when someone inevitably forgets or doesn't read this.
 
 ## Installation
 
-Yamlet is not currently available on Pip. It is a single Python file; you may
-copy it into your project wherever you like.
+```bash
+pip install yamlet
+```
 
-I will attempt to publish to PyPI sooner or later.
+Yamlet is a single Python file; you may also just copy `yamlet.py` into your
+project wherever you like.
 
 
 ## Features
