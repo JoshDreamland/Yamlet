@@ -77,6 +77,7 @@ Here’s a summary of Yamlet’s features:
   (to allow splitting up configs or splitting out templates)
 - [Lambda expressions](#lambda-expressions)
 - [Custom functions](#custom-functions) (defined in Python)
+- [GCL Special Values](#gcl-special-values) `null` and `external`.
 - Explicit [value referencing](#scoping-quirks) in composited tuples using
   `up`/`super`
   - `up` refers to the scope that contains the current scope, as in nested
@@ -394,7 +395,7 @@ In addition to `up` and `super`, GCL defines the special values `null` and
 
 As a simple example of `null`, consider the following:
 
-```yamlet
+```yaml
 t1:
   key_to_keep: present
   key_to_delete: also present
