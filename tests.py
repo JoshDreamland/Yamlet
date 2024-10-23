@@ -277,8 +277,8 @@ class TestTupleCompositing(unittest.TestCase):
       t1 {
           t2_only_key: 'Value that only appears in t2',
           sub: [{
-            t2_only_key2: 'Second value that only appears in t1'
-          }][0],
+            t2_only_key2: 'Second value that only appears in t2'
+          }][0],  # Trick to replace `sub` entirely
           sub2: {
             t2_only_key3: 'Nested value only in t2'
           }
@@ -1224,6 +1224,26 @@ class RunExample(unittest.TestCase):
     loader = yamlet.Loader(self.Opts())
     y = loader.load(YAMLET)
     self.assertEqual(y['tup'].keys(), {'dynamic_key'})
+
+  def test_nullification_example_from_the_readme(self):
+    YAMLET = '''# Yamlet
+    t1:
+      key_to_keep: present
+      key_to_delete: also present
+    deleter:
+      key_to_delete: !null
+    t2: !expr t1 deleter
+    t3: !expr t1 t2
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['t1'].keys(), {'key_to_keep', 'key_to_delete'})
+    self.assertEqual(y['t2'].keys(), {'key_to_keep'})
+    self.assertEqual(y['t3'].keys(), {'key_to_keep', 'key_to_delete'})
+    self.assertEqual(len(y['t1']), 2)
+    self.assertEqual(len(y['t2']), 1)
+    self.assertEqual(len(y['deleter']), 1)
+    self.assertEqual(len(y['t3']), 2)
 
 
 if __name__ == '__main__':
