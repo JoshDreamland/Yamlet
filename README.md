@@ -436,7 +436,7 @@ strings through Ruamel.
 To help with this, Yamlet offers separate tags for `!fmt`
 (formatting string values) and `!expr` (general expression evaluation).
 
-There are there because if you try to write this:
+These are there because if you try to write this:
 ```yaml
 my_string: !expr 'my formatted string with {inlined} {expressions}'
 ```
@@ -554,6 +554,21 @@ All of these values are accessible from the innermost inheriting scope,
 pair first, followed by the values from the inheriting tuple pair.
 
 It’s worth noting that `super.up.fruit` is equivalent to `up.super.fruit`.
+
+### Referencing vs Instantiating
+
+In Yamlet, an expression can simply refer to another tuple *without* attempting
+to instantiate (extend or modify) it.
+
+In this case, the tuple is returned from the expression by reference.
+It will NOT be re-evaluated under its new enclosing scope.
+
+In other words, the Yamlet expressions `t1` and `t1 {}` are semantically
+completely different; the former references `t1`, and the latter extends it
+without modification, creating a simple copy in the new scope.
+
+This applies for composition done by listing tuples sequentially (e.g. `t1 t2`)
+as well; this expression creates a new tuple in the current scope.
 
 ## Differences from GCL
 
