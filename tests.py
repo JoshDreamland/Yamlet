@@ -1245,6 +1245,25 @@ class RunExample(unittest.TestCase):
     self.assertEqual(len(y['deleter']), 1)
     self.assertEqual(len(y['t3']), 2)
 
+  def test_most_basic_goddamn_example_from_the_readme(self):
+    loader = yamlet.Loader()
+    t = loader.load_file('yaml-gcl.yaml')
+    self.assertEqual(t['childtuple']['coolbeans'],
+                     'Hello, world! I say cooool beans!')
+    self.assertEqual(t['childtuple2']['coolbeans'],
+                     'Hello, world! I say awesome sauce!')
+
+  def test_easy_load(self):
+    hi = yamlet.load('hi')
+    self.assertEqual(hi, 'hi')
+
+  def test_easy_load_file(self):
+    t = yamlet.load_file('yaml-gcl.yaml')
+    self.assertEqual(t['childtuple']['coolbeans'],
+                     'Hello, world! I say cooool beans!')
+    self.assertEqual(t['childtuple2']['coolbeans'],
+                     'Hello, world! I say awesome sauce!')
+
 
 if __name__ == '__main__':
   unittest.main()

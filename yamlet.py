@@ -1,7 +1,24 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 # Copyright (C) 2024 Josh Ventura <joshv10>
-# You may use and redistribute this file under the terms of the MIT License.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 
 import ast
 import copy
@@ -14,7 +31,7 @@ import sys
 import token
 import tokenize
 
-VERSION = '0.0.1.A'
+VERSION = '0.0.2'
 ConstructorError = ruamel.yaml.constructor.ConstructorError
 class YamletBaseException(Exception): pass
 
@@ -37,10 +54,11 @@ class YamletOptions:
 
 
 class Loader(ruamel.yaml.YAML):
-  def __init__(self, opts):
+  def __init__(self, opts=None):
     super().__init__()
-    self.loaded_modules = {}
+    opts = opts or YamletOptions()
     self.yamlet_options = opts
+    self.loaded_modules = {}
     # Set custom dict type for base operations
     self.constructor.yaml_base_dict_type = GclDict
     self.representer.add_representer(GclDict, self.representer.represent_dict)
@@ -91,7 +109,7 @@ class Loader(ruamel.yaml.YAML):
     yc.add_constructor("!else",      Loader._ConstructElse)
     yc.add_constructor("!null",      ConstructConstant('null',     null))
     yc.add_constructor("!external",  ConstructConstant('external', external))
-    for tag, ctor in opts.constructors.items():
+    for tag, ctor in self.yamlet_options.constructors.items():
       yc.add_constructor(tag, UserConstructor(ctor))
 
   def LoadCachedFile(self, fn):
@@ -166,6 +184,10 @@ class _DebugOpts:
     def default(x, y): return y if x is None else x
     self.preprocessing = default(preprocessing, _DebugOpts.PREPROCESS_MINIMAL)
     self.traces = default(traces, _DebugOpts.TRACE_VERBOSE)
+
+
+def load(data): return Loader().load(data)
+def load_file(data): return Loader().load_file(data)
 
 
 '''▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░
