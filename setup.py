@@ -1,9 +1,22 @@
+import re
+from pathlib import Path
 from setuptools import setup, find_packages
+
+def get_version():
+  version_file = Path(__file__).parent / "yamlet.py"
+  with version_file.open() as f:
+    version_match = re.search(r'^VERSION = ["\']([^"\']+)["\']', f.read(), re.M)
+    if version_match:
+      return version_match.group(1)
+    raise RuntimeError("Unable to find version string.")
+
+yamlet_version = get_version()
+print(f'Setting up Yamlet version {yamlet_version}')
 
 at, g_mail = '@', 'gmail.com'
 setup(
     name="yamlet",
-    version="0.0.1.1",
+    version=yamlet_version,
     author="Josh Ventura",
     author_email=f"JoshV{10}{at}{g_mail}",
     description="A GCL-like templating engine for YAML",
