@@ -376,7 +376,7 @@ class TestInheritance(unittest.TestCase):
 
 
 @ParameterizedOnOpts
-class TestStringMechanics(unittest.TestCase):
+class TestValueMechanics(unittest.TestCase):
   def test_escaped_braces(self):
     YAMLET = '''# Yamlet
     v: Hello
@@ -386,6 +386,47 @@ class TestStringMechanics(unittest.TestCase):
     loader = yamlet.Loader(self.Opts())
     y = loader.load(YAMLET)
     self.assertEqual(y['v3'], '{Hello}, {{world}}{s}!')
+
+  def test_array_comprehension(self):
+    YAMLET = '''# Yamlet
+    my_array: [1, 2, 'red', 'blue']
+    fishes: !expr "['{x} fish' for x in my_array]"
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['fishes'], ['1 fish', '2 fish', 'red fish', 'blue fish'])
+
+  def test_dict_comprehension(self):
+    YAMLET = '''# Yamlet
+    my_array: [1, 2, 'red', 'blue']
+    fishes: !expr "{x: 'fish' for x in my_array}"
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['fishes'],
+                     {1: 'fish', 2: 'fish', 'red': 'fish', 'blue': 'fish'})
+
+  def test_array_comprehension_square(self):
+    YAMLET = '''# Yamlet
+    array1: [1, 2, 3, 4]
+    array2: ['red', 'green', 'blue', 'yellow']
+    fishes: !expr "['{x} {y} fish' for x in array1 for y in array2]"
+    filtered: !expr |
+        ['{x} {y} fish' for x in array1 for y in array2 if x != len(y)]
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    fishes = t['fishes']
+    self.assertEqual(len(fishes), 16)
+    self.assertEqual(fishes[0], '1 red fish')
+    self.assertEqual(fishes[15], '4 yellow fish')
+    filtered = t['filtered']
+    self.assertEqual(len(filtered), 14)
+    self.assertEqual(filtered, [
+        '1 red fish', '1 green fish', '1 blue fish', '1 yellow fish',
+        '2 red fish', '2 green fish', '2 blue fish', '2 yellow fish',
+        '3 green fish', '3 blue fish', '3 yellow fish',
+        '4 red fish', '4 green fish', '4 yellow fish'])
 
 
 @ParameterizedOnOpts
@@ -1263,6 +1304,15 @@ class RunExample(unittest.TestCase):
                      'Hello, world! I say cooool beans!')
     self.assertEqual(t['childtuple2']['coolbeans'],
                      'Hello, world! I say awesome sauce!')
+
+  def test_one_fish_two_fish_from_readme(self):
+    YAMLET = '''# Yamlet
+    my_array: [1, 2, 'red', 'blue']
+    fishes: !expr r', '.join('{x} fish' for x in my_array)
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['fishes'], '1 fish, 2 fish, red fish, blue fish')
 
 
 if __name__ == '__main__':

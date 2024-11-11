@@ -77,6 +77,7 @@ Here’s a summary of Yamlet’s features:
 - [Conditionals, as seen in procedural languages](#conditionals)
 - [File Imports](#file-imports)
   (to allow splitting up configs or splitting out templates)
+- [Comprehensions](#comprehensions)
 - [Lambda expressions](#lambda-expressions)
 - [Custom functions](#custom-functions) (defined in Python)
 - [GCL Special Values](#gcl-special-values) `null` and `external`.
@@ -337,6 +338,25 @@ Importing is actually deferred until data from the file is accessed, so you
 may import as many files as you like, import files that don't exist, import
 yourself, or import files cyclically—errors will only occur if you try to
 access undefined or cyclic values within those files.
+
+### Comprehensions
+
+Yamlet expressions inherit list comprehension syntax from Python.
+
+```yaml
+my_array: [1, 2, 'red', 'blue']
+fishes: !expr r', '.join('{x} fish' for x in my_array)
+```
+
+In this example, the `fishes` array evaluates to
+`1 fish, 2 fish, red fish, blue fish`.
+
+A couple notes:
+1. A raw string is used for the comma character to stop YAML
+   from interpreting just the first literal as the scalar value.
+2. Though an f-string could be used in the generator expression,
+   it is not required as all Yamlet literals use {} for formatting.
+   Using an f-string would allow Python's formatting options in the {}.
 
 ### Lambda Expressions
 

@@ -30,8 +30,9 @@ import ruamel.yaml
 import sys
 import token
 import tokenize
+import typing
 
-VERSION = '0.0.2'
+VERSION = '0.0.3'
 ConstructorError = ruamel.yaml.constructor.ConstructorError
 class YamletBaseException(Exception): pass
 
@@ -85,15 +86,6 @@ class Loader(ruamel.yaml.YAML):
             node.start_mark)
         return val
       return Constructor
-    def UserConstructor(ctor):
-      def Construct(loader, node):
-        try: return ctor(loader, node)
-        except Exception as e:
-          raise ConstructorError(None, None,
-              f'Yamlet user constructor `!{tag}` encountered an error; '
-              'is your type constructable from `(ruamel.Loader, ruamel.Node)`?',
-              node.start_mark) from e
-      return Construct
 
     yc = self.constructor
     yc.add_constructor(None, UndefinedConstructor)  # Raise on undefined tags
@@ -110,7 +102,17 @@ class Loader(ruamel.yaml.YAML):
     yc.add_constructor("!null",      ConstructConstant('null',     null))
     yc.add_constructor("!external",  ConstructConstant('external', external))
     for tag, ctor in self.yamlet_options.constructors.items():
-      yc.add_constructor(tag, UserConstructor(ctor))
+      self.add_constructor(tag, ctor)
+
+  def add_constructor(self, tag, ctor):
+    def UserConstructor(loader, node):
+      try: return ctor(loader, node)
+      except Exception as e:
+        raise ConstructorError(None, None,
+            f'Yamlet user constructor `!{tag}` encountered an error; '
+            'is your type constructable from `(ruamel.Loader, ruamel.Node)`?',
+            node.start_mark) from e
+    self.constructor.add_constructor(tag, UserConstructor)
 
   def LoadCachedFile(self, fn):
     fn = fn.resolve()
@@ -127,9 +129,15 @@ class Loader(ruamel.yaml.YAML):
     return res
 
   def ConstructGclDict(self, loader, node):
-    return ProcessYamlPairs(
-        loader.construct_pairs(node), gcl_opts=self.yamlet_options,
-        yaml_point=YamlPoint(start=node.start_mark, end=node.end_mark))
+    try:
+      return ProcessYamlPairs(
+          loader.construct_pairs(node), gcl_opts=self.yamlet_options,
+          yaml_point=YamlPoint(start=node.start_mark, end=node.end_mark))
+    except Exception as e:
+      if isinstance(e, ConstructorError): raise
+      raise ConstructorError(None, None,
+          f'Yamlet error while processing dictionary: {str(e)}',
+          node.start_mark) from e
 
   def DeferGclComposite(self, loader, node):
     marks = YamlPoint(node.start_mark, node.end_mark)
@@ -913,7 +921,10 @@ def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point):
   filtered_pairs = {}
   preprocessors = {}
   if_directive = None
-  cErr = lambda msg, v: ConstructorError(None, None, msg, v._yaml_point_.start)
+  cErr = lambda msg, v=None: ConstructorError(
+             None, None, msg,
+             v._yaml_point_.start if hasattr(v, '_yaml_point_')
+                                  else yaml_point.start)
   notDict = lambda v: (
       not isinstance(v, GclDict) and not isinstance(v, PreprocessingTuple))
   notDictErr = lambda k, v: cErr(
@@ -949,6 +960,9 @@ def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point):
       raise cErr('Yamlet keys from YAML mappings must be constant', k)
     else:
       terminateIfDirective()
+      if not isinstance(k, typing.Hashable):
+        raise cErr(f'found unacceptable key (unhashable type: \''
+                   f'{type(k).__name__}\'): {k}')
       if k in filtered_pairs:
         raise cErr(f'Duplicate tuple key `{k}`: '
                    'this is defined to be an error in Yamlet 0.0')
@@ -1092,7 +1106,17 @@ def _BuiltinFuncsMapper():
   def cond(ectx, condition, if_true, if_false):
     return (EvalGclAst(if_true, ectx) if EvalGclAst(condition, ectx)
             else EvalGclAst(if_false, ectx))
-  return { 'cond': cond, 'len': len, 'int': int, 'float': float, 'str': str }
+  # XXX: I elided next() because it's ugly and throws; probably better to add
+  # an nth() method that just returns the nth item in the sequence, or maybe
+  # just pile itertools onto the stack.
+  python_builtins = [
+      abs, all, any, ascii, bin, bool, bytearray, bytes, callable, chr, complex,
+      dict, divmod, enumerate, filter, float, format, frozenset, getattr,
+      hasattr, hash, hex, id, int, isinstance, issubclass, iter, len, list, map,
+      max, min, oct, ord, range, repr, reversed, round, set, setattr, slice,
+      sorted, str, sum, tuple, type, vars, zip
+  ]
+  return { 'cond': cond } | {bi.__name__: bi for bi in python_builtins}
 _BUILTIN_FUNCS = _BuiltinFuncsMapper()
 
 
@@ -1128,6 +1152,42 @@ def _GclExprEval(expr, ectx):
   return EvalGclAst(_InsertCompositOperators(expr), ectx)
 
 
+def _EvalComprehension(elt, generators, ectx, index=0):
+  """Evaluates nested generators with optional if-clauses in a comprehension."""
+  # Base case: all generators processed, evaluate `elt`
+  if index == len(generators):
+    yield EvalGclAst(elt, ectx)
+    return
+
+  generator = generators[index]
+  iter_values = EvalGclAst(generator.iter, ectx)
+
+  ectx.Assert(isinstance(iter_values, typing.Iterable),
+              f'Expected an iterable in generator expression, got `{type(iter_values).__name__}`.', TypeError)
+  ectx.Assert(isinstance(generator.target, (ast.Name, ast.Tuple)),
+              f'Comprehension target should be Name or Tuple, '
+              f'but got `{type(generator.target).__name__}`', TypeError)
+
+  for item in iter_values:
+    # Set up target variables in a new scope
+    if isinstance(generator.target, ast.Name):
+      targets = {generator.target.id: item}
+    else:
+      ectx.Assert(all(isinstance(t, ast.Name) for t in generator.target.elts),
+                  'All tuple entries in comprehension target should be names.',
+                  TypeError)
+      ectx.Assert(len(generator.target.elts) == len(item),
+                  'Tuple unpacking length mismatch in comprehension target.',
+                  TypeError)
+      targets = {t.id: item[i] for i, t in enumerate(generator.target.elts)}
+
+    scoped_ectx = ectx.Branch('comprehension', ectx.GetPoint(),
+                              ectx.NewGclDict(targets))
+
+    if all(EvalGclAst(cond, scoped_ectx) for cond in generator.ifs):
+      yield from _EvalComprehension(elt, generators, scoped_ectx, index + 1)
+
+
 def EvalGclAst(et, ectx):
   ev = lambda x: EvalGclAst(x, ectx)
   match type(et):
@@ -1137,6 +1197,21 @@ def EvalGclAst(et, ectx):
       if isinstance(et.value, str):
         return _ResolveStringValue(et.value, ectx)
       return et.value
+
+    case ast.JoinedStr:
+      return ''.join(ev(v) for v in et.values)
+
+    case ast.FormattedValue:
+      v = ev(et.value)
+      match et.conversion:
+        case -1:  v = f'{v}'  # XXX: documentation does not say what this is
+        case 115: v = str(v)
+        case 114: v = repr(v)
+        case 97:  v = ascii(v)
+        case _: ectx.Raise(f'Unsupported Python conversion {et.conversion}')
+      if not et.format_spec: return v
+      return ev(et.format_spec).format(v)
+
     case ast.Attribute:
       val = ev(et.value)
       if et.attr in _BUILTIN_NAMES:
@@ -1144,7 +1219,9 @@ def EvalGclAst(et, ectx):
       if isinstance(val, GclDict):
         try: return val._gcl_traceable_get_(et.attr, ectx)
         except KeyError: ectx.Raise(KeyError, f'No {et.attr} in this scope.')
-      try: return val[et.attr]
+      try:
+        if isinstance(val, GclDict): return val[et.attr]
+        else: return getattr(val, et.attr)
       except Exception as e:
         ectx.Raise(KeyError, f'Cannot access attribute on value:\n  value'
              f'({type(val).__name__}): {val}\n  attribute: {et.attr}\n', e)
@@ -1159,6 +1236,7 @@ def EvalGclAst(et, ectx):
         case ast.Mod: return l % r
         case ast.MatMult: return _CompositeGclTuples([l, r], ectx)
       ectx.Raise(NotImplementedError, f'Unsupported binary operator `{et.op}`.')
+
     case ast.Compare:
       l = ev(et.left)
       for op, r in zip(et.ops, et.comparators):
@@ -1179,6 +1257,7 @@ def EvalGclAst(et, ectx):
         if not v: return False
         l = r
       return True
+
     case ast.BoolOp:
       v = None
       match type(et.op):
@@ -1193,8 +1272,10 @@ def EvalGclAst(et, ectx):
         case _: ectx.Raise(NotImplementedError,
                            f'Unknown boolean operator `{op}`.')
       return v
+
     case ast.IfExp:
       return ev(et.body) if ev(et.test) else ev(et.orelse)
+
     case ast.Call:
       fun, fun_name = None, None
       if isinstance(et.func, ast.Name):
@@ -1212,14 +1293,20 @@ def EvalGclAst(et, ectx):
       fun_args = [EvalGclAst(arg, ectx) for arg in fun_args]
       fun_kwargs = {k: EvalGclAst(v, ectx) for k, v in fun_kwargs.items()}
       return fun(*fun_args, **fun_kwargs)
+
     case ast.Subscript:
       v = ev(et.value)
       if isinstance(et.slice, ast.Slice):
         return v[et.slice.lower and ev(et.slice.lower)
                 :et.slice.upper and ev(et.slice.upper)]
       return v[ev(et.slice)]
+
     case ast.List:
       return [ev(x) for x in et.elts]
+
+    case ast.Tuple:
+      return tuple(ev(x) for x in et.elts)
+
     case ast.Dict:
       def EvalKey(k):
         if isinstance(k, ast.Name): return k.id
@@ -1239,6 +1326,17 @@ def EvalGclAst(et, ectx):
                              for k,v in zip(et.keys, et.values)})
       for c in children: c._gcl_parent_ = res
       return res
+
+    case ast.GeneratorExp:
+      return _EvalComprehension(et.elt, et.generators, ectx)
+    case ast.ListComp:
+      return list(_EvalComprehension(et.elt, et.generators, ectx))
+    case ast.SetComp:
+      return set(_EvalComprehension(et.elt, et.generators, ectx))
+    case ast.DictComp:
+      return dict(_EvalComprehension(ast.Tuple([et.key, et.value]),
+                                     et.generators, ectx))
+
   ectx.Raise(NotImplementedError,
              f'Undefined Yamlet operation `{type(et).__name__}`')
 
