@@ -80,6 +80,7 @@ Here’s a summary of Yamlet’s features:
 - [Comprehensions](#comprehensions)
 - [Lambda expressions](#lambda-expressions)
 - [Custom functions](#custom-functions) (defined in Python)
+- [Custom tags](#custom-tags) for building user-defined types.
 - [GCL Special Values](#gcl-special-values) `null` and `external`.
 - Explicit [value referencing](#scoping-quirks) in composited tuples using
   `up`/`super`
@@ -399,6 +400,47 @@ print(data['quad'])  # Prints -1
 
 With this approach, you can define custom functions for use in Yamlet
 expressions, which can lead to even more expressive configuration files.
+
+
+### Custom Tags
+
+You can add custom tag constructors to Yamlet the same way you would in Ruamel:
+
+```py
+    loader.add_constructor('!custom', CustomType)
+```
+
+In this example, `CustomType` will be instantiated with a Ruamel Loader and
+Node, which you can handle as you would with vanilla Ruamel.
+
+On top of this, however, offers an additional "style" attribute for your custom
+types:
+
+```py
+loader.add_constructor('!custom', CustomType,
+                       style=yamlet.ConstructStyle.SCALAR)
+```
+
+With this setup, `CustomType` will be instantiated using the final scalar value
+obtained from Ruamel. Additionally, Yamlet provides the following composite tags
+by default (unless `tag_compositing=False` is specified):
+
+* `!custom:fmt`: Performs a string formatting operation
+      (as usual for the Yamlet `!fmt` tag) and constructs your `CustomType`
+      with the string result.
+* `!custom:expr`: Evaluates the input as a Yamlet expression
+      (as usual for the Yamlet `!expr` tag) and constructs your `CustomType`
+      with the resulting value, whatevr type it may have.
+* `!custom:raw`: Requests the scalar value from Ruamel and constructs your
+      `CustomType` directly with that value. This is the default behavior
+      for `ConstructStyle.SCALAR`, so in this case, `!custom` and `!custom:raw`
+      behave identically.
+
+You can also specify `ConstructStyle.FMT` or `ConstructStyle.EXPR` when
+registering the constructor to set the default behavior of the base tag
+(`!custom`) to formatting or expression evaluation. All three composite tags
+(`:fmt`, `:expr`, and `:raw`) will still be available by default unless you
+set `tag_compositing=False`.
 
 
 ### GCL Special Values

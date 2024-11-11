@@ -54,6 +54,21 @@ class YamletOptions:
     self.debugging = _yamlet_debug_opts or _DebugOpts()
 
 
+class ConstructStyle:
+  # Your type will be constructed with the loader and node.
+  # This is identical to how Ruamel/PyYAML constructors work.
+  RAW = 'RAW'
+  # Your type will be constructed with the processed YAML value.
+  # This may be a string, list, GclDict, etc.
+  SCALAR = 'SCALAR'
+  # The value will be treated as a string format operation (`!fmt`),
+  # and your type will be constructed from its result.
+  FMT = 'FMT'
+  # The value will be treated as a Yamlet expression (`!expr`),
+  # and your type will be constructed from the result.
+  EXPR = 'EXPR'
+
+
 class Loader(ruamel.yaml.YAML):
   def __init__(self, opts=None):
     super().__init__()
@@ -102,17 +117,48 @@ class Loader(ruamel.yaml.YAML):
     yc.add_constructor("!null",      ConstructConstant('null',     null))
     yc.add_constructor("!external",  ConstructConstant('external', external))
     for tag, ctor in self.yamlet_options.constructors.items():
-      self.add_constructor(tag, ctor)
+      if callable(ctor): self.add_constructor(tag, ctor)
+      else:
+        assert isinstance(ctor, dict), ('Yamlet constructors should be callable'
+            ' or give arguments to `add_constructor`; '
+            f'got `{type(ctor).__name__}` for `{tag}`')
+        self.add_constructor(tag, **ctor)
 
-  def add_constructor(self, tag, ctor):
-    def UserConstructor(loader, node):
-      try: return ctor(loader, node)
-      except Exception as e:
-        raise ConstructorError(None, None,
-            f'Yamlet user constructor `!{tag}` encountered an error; '
-            'is your type constructable from `(ruamel.Loader, ruamel.Node)`?',
-            node.start_mark) from e
-    self.constructor.add_constructor(tag, UserConstructor)
+  def add_constructor(self, tag, ctor,
+                      style=ConstructStyle.RAW, tag_compositing=True):
+    yc = self.constructor
+    if style == ConstructStyle.RAW:
+      def RawUserConstructor(loader, node):
+        try: return ctor(loader, node)
+        except Exception as e:
+          raise ConstructorError(None, None,
+              f'Yamlet user constructor `!{tag}` encountered an error; '
+              'is your type constructable from `(ruamel.Loader, ruamel.Node)`?',
+              node.start_mark) from e
+      yc.add_constructor(tag, RawUserConstructor)
+      return self
+    def ConstructDefer(deferred, tp):
+      def Constructor(loader, node):
+        return deferred(tp, loader.construct_scalar(node),
+                        YamlPoint(node.start_mark, node.end_mark))
+      return Constructor
+    def ConstructScalar(tp):
+      def Constructor(loader, node): return tp(loader.construct_scalar(node))
+      return Constructor
+    match style:
+      case ConstructStyle.SCALAR:
+        yc.add_constructor(tag, ConstructScalar(ctor))
+      case ConstructStyle.FMT:
+        yc.add_constructor(tag, ConstructDefer(StringToSubAndWrap, ctor))
+      case ConstructStyle.EXPR:
+        yc.add_constructor(tag, ConstructDefer(ExprToEvalAndWrap, ctor))
+      case _:
+        raise ValueError(f'Unknown construction style `{style}`')
+    if tag_compositing:
+      yc.add_constructor(tag + ':raw', ConstructScalar(ctor))
+      yc.add_constructor(tag + ':fmt', ConstructDefer(StringToSubAndWrap, ctor))
+      yc.add_constructor(tag + ':expr', ConstructDefer(ExprToEvalAndWrap, ctor))
+    return self
 
   def LoadCachedFile(self, fn):
     fn = fn.resolve()
@@ -418,7 +464,7 @@ def exceptions(bc):
   return YamletException
 
 
-class ExceptionWithYamletTrace(Exception):
+class ExceptionWithYamletTrace(YamletBaseException):
   def __init__(self, ex_class, message):
     super().__init__(message)
     self.ex_class = ex_class
@@ -624,20 +670,33 @@ class StringToSubstitute(DeferredValue):
     return _ResolveStringValue(value, ectx)
 
 
+class ExpressionToEvaluate(DeferredValue):
+  def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
+  def _gcl_explanation_(self):
+    return f'Evaluating expression `{self._gcl_construct_.strip()}`'
+  def _gcl_evaluate_(self, value, ectx):
+    try: return _GclExprEval(value, ectx)
+    except Exception as e:
+      if isinstance(e, YamletBaseException): raise
+      ectx.Raise(type(e), f'Error in Yamlet expression: {e}.\n', e)
+
+
+class DeferredValueWrapper(DeferredValue):
+  def __init__(self, klass, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.klass = klass
+  def _gcl_evaluate_(self, value, ectx):
+    return self.klass(super()._gcl_evaluate_(value, ectx))
+class StringToSubAndWrap(DeferredValueWrapper, StringToSubstitute): pass
+class ExprToEvalAndWrap(DeferredValueWrapper, ExpressionToEvaluate): pass
+
+
 class TupleListToComposite(DeferredValue):
   def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
   def _gcl_explanation_(self):
     return f'Compositing tuple list `{self._gcl_construct_}`'
   def _gcl_evaluate_(self, value, ectx):
       return _CompositeYamlTupleList(value, ectx)
-
-
-class ExpressionToEvaluate(DeferredValue):
-  def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
-  def _gcl_explanation_(self):
-    return f'Evaluating expression `{self._gcl_construct_.strip()}`'
-  def _gcl_evaluate_(self, value, ectx):
-    return _GclExprEval(value, ectx)
 
 
 class IfLadderTableIndex(DeferredValue):
@@ -1307,14 +1366,18 @@ def EvalGclAst(et, ectx):
     case ast.Tuple:
       return tuple(ev(x) for x in et.elts)
 
+    case ast.Set:
+      return set(ev(elt) for elt in et.elts)
+
     case ast.Dict:
       def EvalKey(k):
         if isinstance(k, ast.Name): return k.id
         if isinstance(k, ast.Constant):
           if isinstance(k.value, str):
             return _ResolveStringValue(k.value, ectx)
+          return k.value
         ectx.Raise(KeyError, 'Yamlet keys should be names or strings. '
-                             f'Got {type(et).__name__}')
+                             f'Got `{type(k).__name__}`:\n{k}')
       children = []
       def DeferAst(v):
         if isinstance(v, ast.Dict):

@@ -428,6 +428,38 @@ class TestValueMechanics(unittest.TestCase):
         '3 green fish', '3 blue fish', '3 yellow fish',
         '4 red fish', '4 green fish', '4 yellow fish'])
 
+  def test_dict_literal(self):
+    YAMLET = '''# Yamlet
+    four: 4
+    mydict: !expr |
+      {1: 2, three: four}
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(set(t['mydict'].keys()), {1, 'three'})
+    self.assertEqual(t['mydict'][1], 2)
+    self.assertEqual(t['mydict']['three'], 4)
+
+  def test_set_literal(self):
+    YAMLET = '''# Yamlet
+    four: 4
+    myset: !expr |
+      {1, 2, 'three', four}
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['myset'], {1, 2, 'three', 4})
+
+  def test_pytuple_literal(self):
+    YAMLET = '''# Yamlet
+    four: 4
+    my_python_tuple: !expr |
+      (1, 2, 'three', four)
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['my_python_tuple'], (1, 2, 'three', 4))
+
 
 @ParameterizedOnOpts
 class TestFunctions(unittest.TestCase):
@@ -468,7 +500,7 @@ class TestConditionals(unittest.TestCase):
     self.assertEqual(y['t2']['color'], 'red')
     self.assertEqual(y['t3']['color'], 'green')
 
-  def test_cond_routine(self):
+  def test_cond_routine_2(self):
     YAMLET = '''# Yamlet
     t1:
       conditionals: !expr |
@@ -535,7 +567,7 @@ class TestConditionals(unittest.TestCase):
     self.assertEqual(set(y['t3'].keys()), {'animal', 'environment'})
     self.assertEqual(set(y['t4'].keys()), {'animal', 'recommendation'})
 
-  def test_if_statement_templating(self):
+  def test_if_statement_templating_2(self):
     YAMLET = '''# Yamlet
     t0:
       !if animal == 'fish':
@@ -929,7 +961,7 @@ class TestFlatCompositing(unittest.TestCase):
     self.assertEqual(y['flashy']['variable'], 'specialized value')
     self.assertEqual(y['boring']['variable'], 'defaulted value')
 
-  def test_specializing_conditions(self):
+  def test_specializing_conditions_2(self):
     YAMLET = '''# Yamlet
     tp:
       variable: !rel defaulted value
@@ -1313,6 +1345,127 @@ class RunExample(unittest.TestCase):
     loader = yamlet.Loader(self.Opts())
     t = loader.load(YAMLET)
     self.assertEqual(t['fishes'], '1 fish, 2 fish, red fish, blue fish')
+
+
+@ParameterizedOnOpts
+class TestCustomConstructors(unittest.TestCase):
+  '''
+  XXX: Ruamel's constructor object is static and inherited between all YAML()
+  instances, so this class tries to use a unique name for each test's tags
+  to avoid cross-contamination.
+  '''
+  class CustomType_LN:
+    def __init__(self, loader, node): self.value = loader.construct_scalar(node)
+    def __str__(self): return self.value
+    def __repr__(self): return f'CustomType_LN({self.value})'
+    def __eq__(self, other):
+      return (isinstance(other, TestCustomConstructors.CustomType_LN)
+              and other.value == self.value)
+
+  class CustomType_V:
+    def __init__(self, value): self.value = value
+    def __str__(self): return self.value
+    def __repr__(self): return f'CustomType_V({self.value})'
+    def __eq__(self, other):
+      return (isinstance(other, TestCustomConstructors.CustomType_V)
+              and other.value == self.value)
+
+  def test_composited_tags(self):
+    YAMLET = '''# Yamlet
+    one: 1
+    two: 2
+    case1: !custom1 one + two
+    case2: !custom1:fmt '{one} + {two}'
+    case3: !custom1:expr one + two
+    '''
+    loader = yamlet.Loader(self.Opts())
+    loader.add_constructor('!custom1', self.CustomType_V,
+                           style=yamlet.ConstructStyle.SCALAR)
+    t = loader.load(YAMLET)
+    self.assertIsInstance(t['case1'], self.CustomType_V)
+    self.assertIsInstance(t['case2'], self.CustomType_V)
+    self.assertIsInstance(t['case3'], self.CustomType_V)
+    self.assertEqual(t['case1'].value, 'one + two')
+    self.assertEqual(t['case2'].value, '1 + 2')
+    self.assertEqual(t['case3'].value, 3)
+
+  def test_raw_tag(self):
+    YAMLET = '''# Yamlet
+    one: 1
+    two: 2
+    case1: !custom2 one + two
+    '''
+    loader = yamlet.Loader(self.Opts())
+    loader.add_constructor('!custom2', self.CustomType_LN)
+    t = loader.load(YAMLET)
+    self.assertIsInstance(t['case1'], self.CustomType_LN)
+    self.assertEqual(t['case1'].value, 'one + two')
+
+  def test_expr_style_tag(self):
+    YAMLET = '''# Yamlet
+    one: 1
+    two: 2
+    case1: !custom3 one + two
+    case2: !custom3:raw one + two
+    case3: !custom3:fmt '{one} + {two}'
+    case4: !custom3:expr one + two
+    '''
+    loader = yamlet.Loader(self.Opts())
+    loader.add_constructor('!custom3', self.CustomType_V,
+                           style=yamlet.ConstructStyle.EXPR)
+    t = loader.load(YAMLET)
+    self.assertIsInstance(t['case1'], self.CustomType_V)
+    self.assertIsInstance(t['case2'], self.CustomType_V)
+    self.assertIsInstance(t['case3'], self.CustomType_V)
+    self.assertIsInstance(t['case4'], self.CustomType_V)
+    self.assertEqual(t['case1'].value, 3)
+    self.assertEqual(t['case2'].value, 'one + two')
+    self.assertEqual(t['case3'].value, '1 + 2')
+    self.assertEqual(t['case4'].value, 3)
+
+  def test_fmt_style_tag(self):
+    YAMLET = '''# Yamlet
+    one: 1
+    two: 2
+    case1: !custom4 '{one} + {two}'
+    case2: !custom4:raw one + two
+    case3: !custom4:fmt '{one} + {two}'
+    case4: !custom4:expr one + two
+    '''
+    loader = yamlet.Loader(self.Opts())
+    loader.add_constructor('!custom4', self.CustomType_V,
+                           style=yamlet.ConstructStyle.FMT)
+    t = loader.load(YAMLET)
+    self.assertIsInstance(t['case1'], self.CustomType_V)
+    self.assertIsInstance(t['case2'], self.CustomType_V)
+    self.assertIsInstance(t['case3'], self.CustomType_V)
+    self.assertIsInstance(t['case4'], self.CustomType_V)
+    self.assertEqual(t['case1'].value, '1 + 2')
+    self.assertEqual(t['case2'].value, 'one + two')
+    self.assertEqual(t['case3'].value, '1 + 2')
+    self.assertEqual(t['case4'].value, 3)
+
+  def test_fancy_ctor_in_opts(self):
+    YAMLET = '''# Yamlet
+    one: 1
+    two: 2
+    case1: !custom5 '{one} + {two}'
+    case2: !custom5:raw one + two
+    case3: !custom5:fmt '{one} + {two}'
+    case4: !custom5:expr one + two
+    '''
+    loader = yamlet.Loader(self.Opts(constructors={
+        '!custom5': {'ctor': self.CustomType_V,
+                     'style': yamlet.ConstructStyle.FMT}}))
+    t = loader.load(YAMLET)
+    self.assertIsInstance(t['case1'], self.CustomType_V)
+    self.assertIsInstance(t['case2'], self.CustomType_V)
+    self.assertIsInstance(t['case3'], self.CustomType_V)
+    self.assertIsInstance(t['case4'], self.CustomType_V)
+    self.assertEqual(t['case1'].value, '1 + 2')
+    self.assertEqual(t['case2'].value, 'one + two')
+    self.assertEqual(t['case3'].value, '1 + 2')
+    self.assertEqual(t['case4'].value, 3)
 
 
 if __name__ == '__main__':
