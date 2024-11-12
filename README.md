@@ -413,8 +413,8 @@ You can add custom tag constructors to Yamlet the same way you would in Ruamel:
 In this example, `CustomType` will be instantiated with a Ruamel Loader and
 Node, which you can handle as you would with vanilla Ruamel.
 
-On top of this, however, offers an additional "style" attribute for your custom
-types:
+On top of this, however, Yamlet offers an additional "style" attribute for your
+custom types:
 
 ```py
 loader.add_constructor('!custom', CustomType,
@@ -425,16 +425,14 @@ With this setup, `CustomType` will be instantiated using the final scalar value
 obtained from Ruamel. Additionally, Yamlet provides the following composite tags
 by default (unless `tag_compositing=False` is specified):
 
-* `!custom:fmt`: Performs a string formatting operation
-      (as usual for the Yamlet `!fmt` tag) and constructs your `CustomType`
-      with the string result.
+* `!custom:fmt`: Applies string formatting (as with Yamlet’s `!fmt` tag) and
+   constructs `CustomType` with the formatted string result.
 * `!custom:expr`: Evaluates the input as a Yamlet expression
-      (as usual for the Yamlet `!expr` tag) and constructs your `CustomType`
-      with the resulting value, whatevr type it may have.
-* `!custom:raw`: Requests the scalar value from Ruamel and constructs your
-      `CustomType` directly with that value. This is the default behavior
-      for `ConstructStyle.SCALAR`, so in this case, `!custom` and `!custom:raw`
-      behave identically.
+   (similar to Yamlet’s `!expr` tag) and constructs `CustomType` with the
+   resulting value, regardless of type.
+* `!custom:raw`: Constructs `CustomType` directly from the scalar value obtained
+   from Ruamel. This is the default behavior for `ConstructStyle.SCALAR`,
+   so in this case, `!custom` and `!custom:raw` behave identically.
 
 You can also specify `ConstructStyle.FMT` or `ConstructStyle.EXPR` when
 registering the constructor to set the default behavior of the base tag
@@ -473,7 +471,7 @@ In the above example,
  - `t1` has both `key_to_keep` and `key_to_delete`
  - `t2` has *only* `key_to_keep`
  - `t3` has *both* `key_to_keep` and `key_to_delete` once again. This is because
-   the key was *missing* from `t2`, not `null` in it.
+   the key was *missing* from `t2`, not `null` within it.
  - `len(t1)` is 2.
  - `len(t2)` is 1.
  - `len(deleter)` is also 1.

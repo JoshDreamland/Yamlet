@@ -32,7 +32,7 @@ import token
 import tokenize
 import typing
 
-VERSION = '0.0.3'
+VERSION = '0.0.3.1'
 ConstructorError = ruamel.yaml.constructor.ConstructorError
 class YamletBaseException(Exception): pass
 
@@ -215,7 +215,6 @@ class Loader(ruamel.yaml.YAML):
         ectx = _EvalContext(None, self.yamlet_options, tup._yaml_point_,
                             'Evaluating preprocessors in Yamlet document.')
       tup = tup._gcl_resolve_(ectx)
-    _RecursiveUpdateParents(tup, None, self.yamlet_options)
     return tup
 
   def load_file(self, filename):
@@ -401,9 +400,6 @@ class GclDict(dict, Compositable):
     self._gcl_preprocess_(ectx)
 
   def _gcl_preprocess_(self, ectx):
-    if not self._gcl_parent_:
-      self._gcl_parent_ = ectx.scope
-      assert self._gcl_parent_ is not self
     ectx = ectx.Branch('Yamlet Preprocessing', ectx._trace_point, self)
     for _, v in self._gcl_preprocessors_.items():
       v._gcl_preprocess_(ectx)
@@ -435,6 +431,7 @@ class GclDict(dict, Compositable):
       return v
     return {k: ev(v) for k, v in self._gcl_noresolve_items_()}
 
+  def _gcl_update_parent_(self, parent): self._gcl_parent_ = parent
   def _gcl_noresolve_values_(self): return super().values()
   def _gcl_noresolve_items_(self): return super().items()
   def _gcl_noresolve_get_(self, k): return super().__getitem__(k)
@@ -615,6 +612,7 @@ class DeferredValue(Cloneable):
     return (isinstance(other, DeferredValue) and
             other._gcl_construct_ == self._gcl_construct_)
 
+  def _gcl_update_parent_(self, parent): pass
   def _gcl_resolve_(self, ectx):
     if self._gcl_cache_ is _empty:
       self._gcl_provenance_ = ectx.BranchForDeferredEval(
@@ -732,7 +730,9 @@ class IfLadderItem(DeferredValue):
     return IfLadderItem((self._gcl_construct_[0], [
         e.yamlet_clone(new_scope) if isinstance(e, Cloneable) else e
         for i, e in enumerate(self._gcl_construct_[1])]), self._yaml_point_)
-    return res
+
+  def _gcl_update_parent_(self, parent):
+    _UpdateParents(self._gcl_construct_[1], parent)
 
   def _gcl_is_undefined_(self, ectx):
     try: result = self._gcl_resolve_(ectx)
@@ -765,6 +765,9 @@ class FlatCompositor(DeferredValue):
       ectx.Raise(ValueError, f'Multiple non-compisitable values given for '
                              f'`{self._gcl_varname_}`.')
     return _CompositeGclTuples(active_composite, ectx)
+
+  def _gcl_update_parent_(self, parent):
+    _UpdateParents(self._gcl_construct_, parent)
 
   def _gcl_is_undefined_(self, ectx):
     for term in self._gcl_construct_:
@@ -827,6 +830,8 @@ class PreprocessingTuple(DeferredValue, Compositable):
   def _gcl_evaluate_(self, value, ectx):
     value._gcl_preprocess_(ectx)
     return value
+  def _gcl_update_parent_(self, parent):
+    self._gcl_construct_._gcl_update_parent_(parent)
   def keys(self): return self._gcl_construct_.keys()
   def _gcl_noresolve_items_(self):
     return self._gcl_construct_._gcl_noresolve_items_()
@@ -841,6 +846,12 @@ class PreprocessingTuple(DeferredValue, Compositable):
     return PreprocessingTuple(self._gcl_construct_.yamlet_clone(new_scope))
   def yamlet_merge(self, other, ectx):
     self._gcl_construct_.yamlet_merge(other, ectx)
+
+
+def _UpdateParents(items, parent):
+  for i in items:
+    if isinstance(i, (GclDict, DeferredValue, PreprocessingTuple)):
+      i._gcl_update_parent_(parent)
 
 
 '''▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░
@@ -1030,6 +1041,7 @@ def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point):
   res = GclDict(filtered_pairs,
                 gcl_parent=None, gcl_super=None, gcl_opts=gcl_opts,
                 preprocessors=preprocessors, yaml_point=yaml_point)
+  _UpdateParents(res._gcl_noresolve_values_(), res)
   preprocess_everything = (
       gcl_opts.debugging.preprocessing == _DebugOpts.PREPROCESS_EVERYTHING)
   if preprocessors or preprocess_everything: return PreprocessingTuple(res)
@@ -1123,14 +1135,6 @@ def _ResolveStringValue(val, ectx):
   return res
 
 
-def _RecursiveUpdateParents(obj, parent, opts):
-  if isinstance(obj, GclDict):
-    setattr(obj, '_gcl_parent_', parent)
-    setattr(obj, '_gcl_opts_', opts)
-    for i in obj._gcl_noresolve_values_():
-      _RecursiveUpdateParents(i, obj, opts)
-
-
 def _CompositeYamlTupleList(tuples, ectx):
   ectx.Assert(isinstance(tuples, list),
               f'Expected list of tuples to composite; got {type(tuples)}')
@@ -1181,7 +1185,7 @@ _BUILTIN_FUNCS = _BuiltinFuncsMapper()
 
 _BUILTIN_NAMES = {
   'up': lambda ectx: ectx.scope._gcl_parent_ or ectx.Raise(ValueError,
-                     f'No enclosing tuple (value to `up`) in this context.'),
+                     f'No enclosing tuple (value to `up`) in this context ({id(ectx.scope)}).'),
   'super': lambda ectx: ectx.scope._gcl_super_ or ectx.Raise(ValueError,
                      f'No parent tuple (value to `super`) in this context.'),
 }
@@ -1387,7 +1391,7 @@ def EvalGclAst(et, ectx):
         return ExpressionToEvaluate(ast.unparse(v), ectx.GetPoint())
       res = ectx.NewGclDict({EvalKey(k): DeferAst(v)
                              for k,v in zip(et.keys, et.values)})
-      for c in children: c._gcl_parent_ = res
+      _UpdateParents(children, res)
       return res
 
     case ast.GeneratorExp:

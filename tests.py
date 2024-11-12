@@ -460,6 +460,27 @@ class TestValueMechanics(unittest.TestCase):
     t = loader.load(YAMLET)
     self.assertEqual(t['my_python_tuple'], (1, 2, 'three', 4))
 
+  def test_string_from_up(self):
+    YAMLET = '''# Yamlet
+    val: 1337
+    t:
+      val2: !expr up.val
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['t']['val2'], 1337)
+
+  def test_string_from_up_in_if(self):
+    YAMLET = '''# Yamlet
+    val: 1337
+    !if 1:
+      t:
+        val2: !expr val
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['t']['val2'], 1337)
+
 
 @ParameterizedOnOpts
 class TestFunctions(unittest.TestCase):
@@ -711,11 +732,12 @@ class TestConditionals(unittest.TestCase):
 
   def test_double_nested_if_statements(self):
     YAMLET = '''# Yamlet
+    one: 1
     tp:
       !if first == 'A':
         !if middle == 'X':
           !if last == 1:
-            result: AX1
+            result: !fmt AX{one}
           !elif last == 2:
             result: AX2
           !else:
