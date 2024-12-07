@@ -170,7 +170,11 @@ class Loader(ruamel.yaml.YAML):
                              'are deferred until name lookup.')
       return res
     self.loaded_modules[fn] = None
-    with open(fn) as file: res = self._ProcessYamlGcl(file)
+    with open(fn) as file:
+      try: res = self._ProcessYamlGcl(file)
+      except Exception as e:
+        self.loaded_modules.pop(fn)
+        raise
     self.loaded_modules[fn] = res
     return res
 
@@ -208,7 +212,7 @@ class Loader(ruamel.yaml.YAML):
         f'Yamlet `!else` got unexpected node type: {repr(node)}')
 
   def _ProcessYamlGcl(self, ygcl):
-    tup = super().load(ygcl)
+    tup = super().load(_WrapStream(ygcl))
     ectx = None
     while isinstance(tup, DeferredValue):
       if not ectx:
@@ -219,7 +223,7 @@ class Loader(ruamel.yaml.YAML):
 
   def load_file(self, filename):
     with open(filename) as fn: return self.load(fn)
-  def load(self, yaml_gcl): return self._ProcessYamlGcl(_WrapStream(yaml_gcl))
+  def load(self, yaml_gcl): return self._ProcessYamlGcl(yaml_gcl)
 
 
 class _DebugOpts:
@@ -652,9 +656,9 @@ class ModuleToLoad(DeferredValue):
     if not fn.exists():
       if value == fn:
         ectx.Raise(FileNotFoundError,
-                   f'Could not import YamlBcl file: {value}')
+                   f'Could not import Yamlet file: {value}')
       ectx.Raise(FileNotFoundError,
-                 f'Could not import YamlBcl file: `{fn}`\n'
+                 f'Could not import Yamlet file: `{fn}`\n'
                  f'As evaluated from this expression: `{value}`.\n')
     loaded = self._gcl_loader_(fn)
     return loaded
