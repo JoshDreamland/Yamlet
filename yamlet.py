@@ -44,13 +44,14 @@ class YamletOptions:
 
   def __init__(self, import_resolver=None, missing_name_value=Error,
                functions={}, globals={}, constructors={}, caching=CACHE_VALUES,
-               _yamlet_debug_opts=None):
+               exception_prefix=None, _yamlet_debug_opts=None):
     self.import_resolver = import_resolver or str
     self.missing_name_value = missing_name_value
     self.functions = functions
     self.globals = globals
     self.caching = caching
     self.constructors = constructors
+    self.exception_prefix = exception_prefix
     self.debugging = _yamlet_debug_opts or _DebugOpts()
 
 
@@ -573,11 +574,14 @@ class _EvalContext:
     if not expr: self.Raise(ex_class, msg)
 
   def Raise(self, ex_class, message_sentence, e=None):
-    if message_sentence == message_sentence.rstrip(): message_sentence += ' '
+    if message_sentence == message_sentence.rstrip():
+      message_sentence += ' ' if message_sentence.endswith((*'.!?',)) else '\n'
+    if self.opts.exception_prefix:
+      message_sentence = f'{self.opts.exception_prefix}{message_sentence}'
     raise ExceptionWithYamletTrace(ex_class,
         f'{ex_class.__name__} occurred while evaluating a Yamlet expression:\n'
         + '\n'.join(_EvalContext._PrettyError(t) for t in self.FullTrace())
-        + f'\n{message_sentence}See above trace for details.') from e
+        + f'\n{message_sentence}See above trace for more details.') from e
 
   def _EnumEvaluating(self):
     p = self
@@ -689,6 +693,8 @@ class DeferredValueWrapper(DeferredValue):
     self.klass = klass
   def _gcl_evaluate_(self, value, ectx):
     return self.klass(super()._gcl_evaluate_(value, ectx))
+  def yamlet_clone(self, new_scope):
+    return type(self)(self.klass, self._gcl_construct_, self._yaml_point_)
 class StringToSubAndWrap(DeferredValueWrapper, StringToSubstitute): pass
 class ExprToEvalAndWrap(DeferredValueWrapper, ExpressionToEvaluate): pass
 
@@ -766,8 +772,10 @@ class FlatCompositor(DeferredValue):
     cxable = sum(isinstance(term, Compositable) for term in active_composite)
     if cxable != len(active_composite):
       if not cxable: return active_composite[-1]
-      ectx.Raise(ValueError, f'Multiple non-compisitable values given for '
-                             f'`{self._gcl_varname_}`.')
+      ectx.Raise(ValueError,
+          f'Mixture of compositable and non-compositable values given for '
+          f'`{self._gcl_varname_}`. Types to composite: ' +
+          ', '.join(f'{type(t).__name__}' for t in active_composite))
     return _CompositeGclTuples(active_composite, ectx)
 
   def _gcl_update_parent_(self, parent):
@@ -778,6 +786,9 @@ class FlatCompositor(DeferredValue):
       if not isinstance(term, DeferredValue): return False
       if not term._gcl_is_undefined_(ectx): return False
     return True
+
+  def add_compositing_value(self, value):
+    self._gcl_construct_.append(value)
 
   def yamlet_clone(self, new_scope):
     return FlatCompositor(
@@ -991,6 +1002,16 @@ class YamletIfElseLadder(PreprocessingDirective):
     return other
 
 
+def _OkayToFlatComposite(v1, v2):
+  if isinstance(v1, Compositable): return True
+  if isinstance(v2, (Compositable, IfLadderItem)): return True
+  if isinstance(v1, DeferredValueWrapper):
+    if issubclass(v1.klass, Compositable): return True
+  if isinstance(v2, DeferredValueWrapper):
+    if issubclass(v2.klass, Compositable): return True
+  return False
+
+
 def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point):
   filtered_pairs = {}
   preprocessors = {}
@@ -1037,10 +1058,16 @@ def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point):
       if not isinstance(k, typing.Hashable):
         raise cErr(f'found unacceptable key (unhashable type: \''
                    f'{type(k).__name__}\'): {k}')
-      if k in filtered_pairs:
-        raise cErr(f'Duplicate tuple key `{k}`: '
-                   'this is defined to be an error in Yamlet 0.0')
-      filtered_pairs[k] = v
+      v0 = filtered_pairs.get(k, _undefined)
+      if v0 is not _undefined:
+        if isinstance(v0, FlatCompositor):
+          v0.add_compositing_value(v)
+        elif not _OkayToFlatComposite(v0, v):
+          raise cErr(f'Duplicate tuple key `{k}` and irreconcilable value types'
+                     f' `{type(v0).__name__}`, `{type(v).__name__}`:'
+                     ' this is defined to be an error in Yamlet 0.5')
+        else: filtered_pairs[k] = FlatCompositor([v0, v], yaml_point, varname=k)
+      else: filtered_pairs[k] = v
   terminateIfDirective()
   res = GclDict(filtered_pairs,
                 gcl_parent=None, gcl_super=None, gcl_opts=gcl_opts,
@@ -1189,7 +1216,7 @@ _BUILTIN_FUNCS = _BuiltinFuncsMapper()
 
 _BUILTIN_NAMES = {
   'up': lambda ectx: ectx.scope._gcl_parent_ or ectx.Raise(ValueError,
-                     f'No enclosing tuple (value to `up`) in this context ({id(ectx.scope)}).'),
+                     f'No enclosing tuple (value to `up`) in this context.'),
   'super': lambda ectx: ectx.scope._gcl_super_ or ectx.Raise(ValueError,
                      f'No parent tuple (value to `super`) in this context.'),
 }
@@ -1230,7 +1257,8 @@ def _EvalComprehension(elt, generators, ectx, index=0):
   iter_values = EvalGclAst(generator.iter, ectx)
 
   ectx.Assert(isinstance(iter_values, typing.Iterable),
-              f'Expected an iterable in generator expression, got `{type(iter_values).__name__}`.', TypeError)
+              f'Expected an iterable in generator expression, '
+              f'got `{type(iter_values).__name__}`.', TypeError)
   ectx.Assert(isinstance(generator.target, (ast.Name, ast.Tuple)),
               f'Comprehension target should be Name or Tuple, '
               f'but got `{type(generator.target).__name__}`', TypeError)
@@ -1420,5 +1448,5 @@ def _CompositeGclTuples(tuples, ectx):
       res = res.yamlet_clone(ectx.scope)
       res.yamlet_merge(t, ectx)
     else:
-      res = t.yamlet_clone(ectx.scope) # if isinstance(t, Cloneable) else t
+      res = t.yamlet_clone(ectx.scope)
   return res
