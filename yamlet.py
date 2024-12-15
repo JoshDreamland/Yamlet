@@ -1323,14 +1323,24 @@ def EvalGclAst(et, ectx):
     case ast.BinOp:
       l, r = ev(et.left), ev(et.right)
       match type(et.op):
-        case ast.Add: return l + r
-        case ast.Sub: return l - r
-        case ast.Mult: return l * r
-        case ast.Div: return l / r
+        case ast.Add:      return l + r
+        case ast.Sub:      return l - r
+        case ast.Mult:     return l * r
+        case ast.Div:      return l / r
         case ast.FloorDiv: return l // r
-        case ast.Mod: return l % r
-        case ast.MatMult: return _CompositeGclTuples([l, r], ectx)
-      ectx.Raise(NotImplementedError, f'Unsupported binary operator `{et.op}`.')
+        case ast.Mod:      return l % r
+        case ast.MatMult:  return _CompositeGclTuples([l, r], ectx)
+      ectx.Raise(NotImplementedError,
+                 f'Unsupported binary operator `{type(et.op).__name__}`.')
+    case ast.UnaryOp:
+      match type(et.op):
+        case ast.UAdd:   return +ev(et.operand)
+        case ast.USub:   return -ev(et.operand)
+        case ast.Not:    return not ev(et.operand)
+        case ast.Invert: return ~ev(et.operand)
+      ectx.Raise(NotImplementedError,
+                 f'Unsupported unary operator `{type(et.op).__name__}`.')
+
 
     case ast.Compare:
       l = ev(et.left)
