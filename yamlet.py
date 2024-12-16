@@ -42,15 +42,19 @@ class YamletOptions:
   CACHE_NOTHING = 2
   CACHE_DEBUG = 3
 
-  def __init__(self, import_resolver=None, missing_name_value=Error,
-               functions={}, globals={}, constructors={}, caching=CACHE_VALUES,
-               exception_prefix=None, _yamlet_debug_opts=None):
+  def __init__(self, *, import_resolver=None,
+               missing_name_value=Error, warn_on_missing=True,
+               functions=None, globals=None, module_vars=None,
+               constructors=None, caching=CACHE_VALUES, exception_prefix=None,
+               _yamlet_debug_opts=None):
     self.import_resolver = import_resolver or str
     self.missing_name_value = missing_name_value
-    self.functions = functions
-    self.globals = globals
+    self.warn_on_missing = warn_on_missing
+    self.functions = functions or {}
+    self.globals = globals or {}
+    self.module_vars = module_vars or {}
+    self.constructors = constructors or {}
     self.caching = caching
-    self.constructors = constructors
     self.exception_prefix = exception_prefix
     self.debugging = _yamlet_debug_opts or _DebugOpts()
 
@@ -68,6 +72,16 @@ class ConstructStyle:
   # The value will be treated as a Yamlet expression (`!expr`),
   # and your type will be constructed from the result.
   EXPR = 'EXPR'
+
+
+class ImportInfo:
+  '''Can be returned from YamletOptions.import_resolver instead of a string.
+
+  Provides more information about the module to be loaded, allowing further
+  configuration customization on the fly.
+  '''
+  def __init__(self, path, module_vars={}):
+    self.path, self.module_vars = path, module_vars
 
 
 class Loader(ruamel.yaml.YAML):
@@ -479,6 +493,20 @@ class YamlPoint:
   def __init__(self, start, end):
     self.start = start
     self.end = end
+  def filename(self):
+    name = self.start.name
+    if len(name) > 256 or len(name.splitlines()) > 1:
+      return name[:256].splitlines()[0] + '...'
+    return name
+  def as_args(self):
+    s, e = self.start, self.end
+    res = f'file={self.filename()},line={s.line},col={s.column}'
+    if e.line > s.line or (e.line == s.line and e.column > s.column):
+      if e.line != s.line: res += f',endLine={e.line}'
+      res += f',endColumn={e.column}'
+    return res
+  def print_warning(self, msg):
+    print(f'::warning {self.as_args()}::{msg}', file=sys.stderr)
 
 
 class _EvalContext:
@@ -508,6 +536,7 @@ class _EvalContext:
 
   def FormatError(yaml_point, msg): return f'{yaml_point.start}\n{msg}'
   def GetPoint(self): return self._trace_point
+  def ModuleFilename(self): return self.GetPoint().filename()
   def Error(self, msg): return _EvalContext.FormatError(self.GetPoint(), msg)
 
   def NewGclDict(self, *args, gcl_parent=None, gcl_super=None, **kwargs):
@@ -656,14 +685,21 @@ class ModuleToLoad(DeferredValue):
 
   def _gcl_evaluate_(self, value, ectx):
     fn = _ResolveStringValue(value, ectx)
-    fn = pathlib.Path(ectx.opts.import_resolver(fn))
+    import_info = ectx.opts.import_resolver(fn)
+    module_vars = None
+    if isinstance(import_info, ImportInfo):
+      final_path = import_info.path
+      module_vars = import_info.module_vars
+    else: final_path = import_info
+    fn = pathlib.Path(final_path)
     if not fn.exists():
       if value == fn:
-        ectx.Raise(FileNotFoundError,
-                   f'Could not import Yamlet file: {value}')
+        ectx.Raise(FileNotFoundError, f'Could not import Yamlet file: {value}')
       ectx.Raise(FileNotFoundError,
                  f'Could not import Yamlet file: `{fn}`\n'
                  f'As evaluated from this expression: `{value}`.\n')
+    fn = fn.resolve()
+    if module_vars: ectx.opts.module_vars[str(fn)] = module_vars
     loaded = self._gcl_loader_(fn)
     return loaded
 
@@ -1236,10 +1272,18 @@ def _GclNameLookup(name, ectx):
   if ectx.scope._gcl_parent_:
     with ectx.Scope(ectx.scope._gcl_parent_):
       return _GclNameLookup(name, ectx)
-  if name in ectx.opts.globals: return ectx.opts.globals[name]
+  mvars = ectx.opts.module_vars.get(ectx.ModuleFilename())
+  if mvars:
+    res = mvars.get(name, _undefined)
+    if res is not _undefined: return res
+  res = ectx.opts.globals.get(name, _undefined)
+  if res is not _undefined: return ectx.opts.globals[name]
+  err = f'There is no variable called `{name}` in this scope.'
   mnv = ectx.opts.missing_name_value
-  if mnv is not YamletOptions.Error: return mnv
-  ectx.Raise(NameError, f'There is no variable called `{name}` in this scope.')
+  if mnv is not YamletOptions.Error:
+    if ectx.opts.warn_on_missing: ectx.GetPoint().print_warning(err)
+    return mnv
+  ectx.Raise(NameError, err)
 
 
 def _GclExprEval(expr, ectx):
