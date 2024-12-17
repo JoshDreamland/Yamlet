@@ -50,6 +50,7 @@ ParameterizedForStress = (
     ParameterizedOnOpts if active(os.getenv('yamlet_stress'))
     else DefaultConfigOnly)
 
+
 @ParameterizedOnOpts
 class TestTupleCompositing(unittest.TestCase):
   def test_composited_fields(self):
@@ -480,6 +481,133 @@ class TestValueMechanics(unittest.TestCase):
     loader = yamlet.Loader(self.Opts())
     t = loader.load(YAMLET)
     self.assertEqual(t['t']['val2'], 1337)
+
+  def test_reference_other_scope(self):
+    YAMLET = '''# Yamlet
+    context:
+      not_in_evaluating_scope: Hello, world!
+      referenced: !fmt '{not_in_evaluating_scope}'
+    result: !expr context.referenced
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['result'], 'Hello, world!')
+
+  def test_reference_other_scope_2(self):
+    YAMLET = '''# Yamlet
+    context:
+      not_in_evaluating_scope: Hello, world!
+      referenced: !fmt '{not_in_evaluating_scope}'
+    context2:
+      inner_ref: !expr context
+      referenced_2: !expr inner_ref.referenced
+    result: !expr context2.referenced_2
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['result'], 'Hello, world!')
+
+  def test_reference_env(self):
+    YAMLET = '''# Yamlet
+    other_context:
+      not_inherited: Hello, world!
+      referenced: !fmt '{not_inherited}'
+    my_context:
+      my_variable: !expr other_context.referenced
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['my_context']['my_variable'], 'Hello, world!')
+
+  def test_reference_nested_env(self):
+    YAMLET = '''# Yamlet
+    other_context:
+      not_inherited: Hello, world!
+      subcontext:
+        referenced: !fmt '{not_inherited}'
+    my_context:
+      captured_subcontext: !expr other_context.subcontext
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['my_context']['captured_subcontext']['referenced'],
+                     'Hello, world!')
+
+  def test_reference_nested_env_2(self):
+    YAMLET = '''# Yamlet
+    other_context:
+      not_inherited: Hello, world!
+      subcontext:
+        referenced: !fmt '{not_inherited}'
+    my_context:
+      captured_subcontext: !composite
+        - other_context.subcontext
+        - red: herring
+          not_inherited: 'Good night, moon!'
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['my_context']['captured_subcontext']['referenced'],
+                     'Good night, moon!')
+
+  def test_reference_nested_env_3(self):
+    YAMLET = '''# Yamlet
+    other_context:
+      not_inherited: Hello, world!
+      subcontext:
+        referenced: !fmt '{not_inherited}'
+    my_context:
+      not_inherited: 'Good night, moon!'
+      captured_subcontext: !composite
+        - other_context.subcontext
+        - red: herring
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['my_context']['captured_subcontext']['referenced'],
+                     'Good night, moon!')
+
+  def test_reference_nested_env_4(self):
+    YAMLET = '''# Yamlet
+    other_context:
+      not_inherited: Hello, world!
+      subcontext:
+        referenced: !fmt '{not_inherited}'
+    my_context:
+      captured_subcontext: !composite
+        - other_context.subcontext
+        - red: herring
+    test_probe: !expr my_context.captured_subcontext.super
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertTrue(t['test_probe'] is t['other_context']['subcontext'])
+    self.assertEqual(t['my_context']['captured_subcontext']['referenced'],
+                     'Hello, world!')
+
+  def test_reference_nested_env_5(self):
+    YAMLET = '''# Yamlet
+    chain_1:
+      not_inherited: Hello, world!
+      subcontext:
+        referenced: !fmt '{not_inherited}'
+    chain_2:
+      captured_subcontext_1: !composite
+        - chain_1.subcontext
+        - red: herring
+    chain_3:
+      captured_subcontext_2: !composite
+        - chain_2.captured_subcontext_1
+        - hoax: value
+    chain_4:
+      captured_subcontext_3: !composite
+        - chain_3.captured_subcontext_2
+        - artifice: more junk
+    result: !fmt '{chain_4.captured_subcontext_3.referenced}'
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['result'], 'Hello, world!')
 
 
 @ParameterizedOnOpts
@@ -966,6 +1094,8 @@ class TestFlatCompositing(unittest.TestCase):
     def __eq__(self, other):
       if isinstance(other, str): return self.val == other
       return self.val == other.val
+
+    def __repr__(self): return f'RelativeStringValue({self.val!r})'
 
   def test_specializing_conditions(self):
     YAMLET = '''# Yamlet

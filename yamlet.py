@@ -21,7 +21,6 @@
 # SOFTWARE.
 
 import ast
-import copy
 import io
 import keyword
 import pathlib
@@ -326,13 +325,13 @@ class Compositable(Cloneable):
 
 class GclDict(dict, Compositable):
   def __init__(self, *args,
-               gcl_parent, gcl_super, gcl_opts, yaml_point, preprocessors,
-               **kwargs):
-    super().__init__(*args, **kwargs)
+               gcl_parent, gcl_super, gcl_opts, yaml_point, preprocessors):
+    super().__init__(*args)
     self._gcl_parent_ = gcl_parent
     self._gcl_super_ = gcl_super
     self._gcl_opts_ = gcl_opts
-    self._gcl_preprocessors_ = preprocessors or {}
+    assert isinstance(preprocessors, dict)
+    self._gcl_preprocessors_ = preprocessors
     self._gcl_provenances_ = {}
     self._yaml_point_ = yaml_point
 
@@ -390,8 +389,8 @@ class GclDict(dict, Compositable):
                 'Expected dict-like type to composite.', ex_class=TypeError)
     for k, v in other._gcl_noresolve_items_():
       if isinstance(v, Compositable):
-        v1 = super().setdefault(k, v)
-        if v1 is not v:
+        v1 = super().setdefault(k, None)
+        if v1 is not None:
           if not isinstance(v1, Compositable):
             ectx.Raise(TypeError, f'Cannot composite `{type(v1)}` object `{k}` '
                                    'with dictionary value in extending tuple.')
@@ -544,7 +543,7 @@ class _EvalContext:
         gcl_parent=gcl_parent or self.scope,
         gcl_super=gcl_super,
         gcl_opts=self.opts,
-        preprocessors=None,
+        preprocessors={},
         yaml_point=self._trace_point)
 
   def Branch(self, name, yaml_point, scope):
@@ -659,7 +658,9 @@ class DeferredValue(Cloneable):
       if ectx.opts.caching == YamletOptions.CACHE_DEBUG:
         if getattr(self, '_gcl_cache_debug_', _empty) is not _empty:
           assert res == self._gcl_cache_debug_, ('Internal error: Cache bug! '
-              f'Cached value `{self._gcl_cache_debug_}` is not `{res}`!')
+              f'Cached value `{self._gcl_cache_debug_}` is not `{res}`!\n'
+              f'There is an error in how `{type(self).__name__}` '
+              f'values are being passed around.\nRepr: {self!r}')
         self._gcl_cache_debug_ = res
         return res
       self._gcl_cache_ = res
@@ -674,7 +675,8 @@ class DeferredValue(Cloneable):
     return (f'<Unevaluated: {self._gcl_construct_}>' if not self._gcl_cache_
             else str(self._gcl_cache_))
   def __repr__(self):
-    return f'<Unevaluated: {self._gcl_construct_}>'
+    return (f'{type(self).__name__}({self._gcl_construct_!r}, '
+            f'cache={self._gcl_cache_!r})')
 
 
 class ModuleToLoad(DeferredValue):
@@ -744,6 +746,10 @@ class TupleListToComposite(DeferredValue):
 
 
 class IfLadderTableIndex(DeferredValue):
+  '''Stashes a sequence of if expressions extracted from an if-else ladder,
+  and evaluates them in order, caching the index of the first truthy expression.
+  Else is represented as -1; the final index in each IfLadderItem table.
+  '''
   def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs)
   def _gcl_explanation_(self):
     return f'Pre-evaluating if-else ladder'
@@ -755,6 +761,9 @@ class IfLadderTableIndex(DeferredValue):
 
 
 class IfLadderItem(DeferredValue):
+  '''References an extracted IfLadderTableIndex in its final scope to look up a
+  value in a table, generated from its values in an if-else ladder.
+  '''
   def __init__(self, *args, **kwargs):
     super().__init__(*args, **kwargs)
 
@@ -763,10 +772,10 @@ class IfLadderItem(DeferredValue):
 
   def _gcl_evaluate_(self, value, ectx):
     ladder, table = value
-    ladder = ectx.scope._gcl_preprocessors_.get(id(ladder))
-    ectx.Assert(ladder,
-                'Internal error: The preprocessor `!if` directive from which '
-                'this value was assigned was not inherited...')
+    ladder = ectx.scope._gcl_preprocessors_.get(ladder)
+    ectx.Assert(ladder, 'Internal error: The preprocessor '
+        f'`!if` directive from which this value was assigned was not inherited.'
+        f'\nGot: {(*ectx.scope._gcl_preprocessors_.keys(),)}\nWant: {ladder}')
     index = ladder.index._gcl_resolve_(ectx)
     result = table[index]
     while isinstance(result, DeferredValue): result = result._gcl_resolve_(ectx)
@@ -901,7 +910,7 @@ class PreprocessingTuple(DeferredValue, Compositable):
 
 def _UpdateParents(items, parent):
   for i in items:
-    if isinstance(i, (GclDict, DeferredValue, PreprocessingTuple)):
+    if isinstance(i, (GclDict, DeferredValue)):
       i._gcl_update_parent_(parent)
 
 
@@ -984,10 +993,17 @@ class YamletIfStatement(PreprocessingDirective): pass
 class YamletElifStatement(PreprocessingDirective): pass
 class YamletElseStatement(PreprocessingDirective): pass
 class YamletIfElseLadder(PreprocessingDirective):
-  def __init__(self, k, v):
-    self.if_statement = (k, v)
-    self.else_statement = None
-    self.elif_statements = []
+  def __init__(self, k=None, v=None, *, index=None, cond_dvals=None):
+    if index:
+      index._gcl_construct_ = self
+      self.index = index  # An `IfLadderTableIndex` to translate this ladder.
+      self.cond_dvals = cond_dvals
+      return
+    assert isinstance(k, YamletIfStatement)
+    assert isinstance(v, (GclDict, PreprocessingTuple))
+    self.if_statement = (k, v)  # k is the !if expression, v is the GclDict.
+    self.else_statement = None  # Similarly, k is !else None, v is GclDict.
+    self.elif_statements = []   # Sequence of k, v pairs for each !elif.
     self.all_vars = set(v.keys())
 
   def PutElif(self, k, v):
@@ -1011,7 +1027,7 @@ class YamletIfElseLadder(PreprocessingDirective):
       for k, v in self.else_statement[1]._gcl_noresolve_items_():
         arrays[k][-1] = v
     for k, v in arrays.items():
-      v0 = IfLadderItem((self, v), ladder_point)
+      v0 = IfLadderItem((id(self), v), ladder_point)
       v1 = filtered_pairs.setdefault(k, v0)
       if v0 is not v1:
         filtered_pairs[k] = FlatCompositor([v1, v0], ladder_point, varname=k)
@@ -1020,7 +1036,7 @@ class YamletIfElseLadder(PreprocessingDirective):
                        for ep in expr_points]
     self.index = IfLadderTableIndex(self, ladder_point)
 
-  def AddPreprocessors(self, preprocessors):
+  def AddToPreprocessorsDict(self, preprocessors):
     preprocessors[id(self)] = self
     preprocessors |= self.if_statement[1]._gcl_preprocessors_
     for elif_statement in self.elif_statements:
@@ -1031,11 +1047,9 @@ class YamletIfElseLadder(PreprocessingDirective):
   def _gcl_preprocess_(self, ectx): pass
 
   def yamlet_clone(self, new_scope):
-    other = copy.copy(self)
-    other.cond_dvals = [dv.yamlet_clone(new_scope) for dv in self.cond_dvals]
-    other.index = self.index.yamlet_clone(new_scope)
-    other.index._gcl_construct_ = self
-    return other
+    return YamletIfElseLadder(
+        index=self.index.yamlet_clone(new_scope),
+        cond_dvals=[dv.yamlet_clone(new_scope) for dv in self.cond_dvals])
 
 
 def _OkayToFlatComposite(v1, v2):
@@ -1065,7 +1079,7 @@ def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point):
     nonlocal if_directive, preprocessors
     if if_directive:
       if_directive.Finalize(filtered_pairs, cErr)
-      if_directive.AddPreprocessors(preprocessors)
+      if_directive.AddToPreprocessorsDict(preprocessors)
       if_directive = None
   for k, v in mapping_pairs:
     if isinstance(k, PreprocessingDirective):
@@ -1261,7 +1275,7 @@ _BUILTIN_VARS = {
 }
 
 
-def _GclNameLookup(name, ectx):
+def _GclNameLookup(name, ectx, top=True):
   if name in _BUILTIN_NAMES: return _BUILTIN_NAMES[name](ectx)
   if name in _BUILTIN_VARS: return _BUILTIN_VARS[name]
   if name in ectx.scope:
@@ -1271,7 +1285,16 @@ def _GclNameLookup(name, ectx):
     if get is not null: return get
   if ectx.scope._gcl_parent_:
     with ectx.Scope(ectx.scope._gcl_parent_):
-      return _GclNameLookup(name, ectx)
+      res = _GclNameLookup(name, ectx, top=False)
+      if res is not _undefined: return res
+  if not top: return _undefined
+  sup = ectx.scope._gcl_super_
+  while sup is not None:
+    if sup._gcl_parent_:
+      with ectx.Scope(sup._gcl_parent_):
+        res = _GclNameLookup(name, ectx, top=False)
+        if res is not _undefined: return res
+    sup = sup._gcl_super_
   mvars = ectx.opts.module_vars.get(ectx.ModuleFilename())
   if mvars:
     res = mvars.get(name, _undefined)
@@ -1498,9 +1521,6 @@ def _CompositeGclTuples(tuples, ectx):
   res = None
   for t in tuples:
     if t is None: ectx.Raise(ValueError, 'Expression evaluation failed?')
-    if res:
-      res = res.yamlet_clone(ectx.scope)
-      res.yamlet_merge(t, ectx)
-    else:
-      res = t.yamlet_clone(ectx.scope)
+    if res: res.yamlet_merge(t, ectx)
+    else:   res = t.yamlet_clone(ectx.scope)
   return res
