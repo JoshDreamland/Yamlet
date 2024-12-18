@@ -832,8 +832,8 @@ class FlatCompositor(DeferredValue):
       if not term._gcl_is_undefined_(ectx): return False
     return True
 
-  def add_compositing_value(self, value):
-    self._gcl_construct_.append(value)
+  def add_compositing_value(self, value): self._gcl_construct_.append(value)
+  def latest_compositing_value(self): return self._gcl_construct_[-1]
 
   def yamlet_clone(self, new_scope):
     return FlatCompositor(
@@ -1052,14 +1052,21 @@ class YamletIfElseLadder(PreprocessingDirective):
         cond_dvals=[dv.yamlet_clone(new_scope) for dv in self.cond_dvals])
 
 
+def _FlatCompositingType(v):
+  if isinstance(v, FlatCompositor): v = v.latest_compositing_value()
+  if isinstance(v, DeferredValueWrapper): return v.klass
+  return type(v)
+
+
+def _ResolvesToCompositable(v):
+  return issubclass(_FlatCompositingType(v), (Compositable, IfLadderItem))
+
+
 def _OkayToFlatComposite(v1, v2):
-  if isinstance(v1, Compositable): return True
   if isinstance(v2, (Compositable, IfLadderItem)): return True
-  if isinstance(v1, DeferredValueWrapper):
-    if issubclass(v1.klass, Compositable): return True
-  if isinstance(v2, DeferredValueWrapper):
-    if issubclass(v2.klass, Compositable): return True
-  return False
+  one_okay = _ResolvesToCompositable(v1)
+  if _ResolvesToCompositable(v2): return one_okay
+  return not one_okay
 
 
 def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point):
@@ -1108,16 +1115,15 @@ def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point):
       if not isinstance(k, typing.Hashable):
         raise cErr(f'found unacceptable key (unhashable type: \''
                    f'{type(k).__name__}\'): {k}')
-      v0 = filtered_pairs.get(k, _undefined)
-      if v0 is not _undefined:
-        if isinstance(v0, FlatCompositor):
-          v0.add_compositing_value(v)
-        elif not _OkayToFlatComposite(v0, v):
-          raise cErr(f'Duplicate tuple key `{k}` and irreconcilable value types'
-                     f' `{type(v0).__name__}`, `{type(v).__name__}`:'
+      v0 = filtered_pairs.setdefault(k, v)
+      if v0 is not v:
+        if not _OkayToFlatComposite(v0, v):
+          raise cErr(f'Duplicate tuple key `{k}` with non-mergeable value type '
+                     f'`{_FlatCompositingType(v).__name__}` follows a value '
+                     f'with type `{_FlatCompositingType(v0).__name__}`: '
                      ' this is defined to be an error in Yamlet 0.5')
+        if isinstance(v0, FlatCompositor): v0.add_compositing_value(v)
         else: filtered_pairs[k] = FlatCompositor([v0, v], yaml_point, varname=k)
-      else: filtered_pairs[k] = v
   terminateIfDirective()
   res = GclDict(filtered_pairs,
                 gcl_parent=None, gcl_super=None, gcl_opts=gcl_opts,
@@ -1162,9 +1168,13 @@ def _InsertCompositOperators(expr):
   tokens = tokenize.tokenize(io.BytesIO(expr.encode('utf-8')).readline)
   token_blocks = []
   cur_tokens = []
+  fstring = 0
   prev_tok = None
   for tok in tokens:
-    if _TokensCollide(prev_tok, tok):
+    if tok.type == token.FSTRING_START: fstring += 1
+    elif tok.type == token.FSTRING_END: fstring -= 1
+    elif fstring: pass
+    elif _TokensCollide(prev_tok, tok):
       token_blocks.append(cur_tokens)
       cur_tokens = []
     cur_tokens.append(tok)
@@ -1394,8 +1404,13 @@ def EvalGclAst(et, ectx):
         case ast.Sub:      return l - r
         case ast.Mult:     return l * r
         case ast.Div:      return l / r
-        case ast.FloorDiv: return l // r
         case ast.Mod:      return l % r
+        case ast.BitAnd:   return l & r
+        case ast.BitOr:    return l | r
+        case ast.BitXor:   return l ^ r
+        case ast.FloorDiv: return l // r
+        case ast.LShift:   return l << r
+        case ast.RShift:   return l >> r
         case ast.MatMult:  return _CompositeGclTuples([l, r], ectx)
       ectx.Raise(NotImplementedError,
                  f'Unsupported binary operator `{type(et.op).__name__}`.')

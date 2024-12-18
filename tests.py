@@ -7,6 +7,7 @@ import unittest
 import yamlet
 
 from contextlib import contextmanager
+from ruamel.yaml.constructor import ConstructorError
 
 def ParameterizedOnOpts(klass):
   YO = yamlet.YamletOptions
@@ -1130,6 +1131,105 @@ class TestFlatCompositing(unittest.TestCase):
     self.assertEqual(y['flashy']['variable'], 'defaulted value specialized value')
     self.assertEqual(y['boring']['variable'], 'defaulted value')
 
+  def test_specializing_conditions_3(self):
+    YAMLET = '''# Yamlet
+    tp:
+      variable: !rel defaulted value
+      switch: off
+      !if switch == 'on':
+        variable: !rel specialized value
+      variable: !rel more defaulted value
+    boring: !expr tp
+    flashy: !expr tp {switch:'on'}
+    '''
+    ctors = {'!rel': TestFlatCompositing.RelativeStringValue}
+    loader = yamlet.Loader(self.Opts(constructors=ctors))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['tp']['variable'],
+                     'defaulted value more defaulted value')
+    self.assertEqual(y['flashy']['variable'],
+                     'defaulted value specialized value more defaulted value')
+    self.assertEqual(y['boring']['variable'],
+                     'defaulted value more defaulted value')
+
+  def test_specializing_conditions_non_relative_error(self):
+    '''As of Yamlet 0.5, it is only considered an error if a composite operation
+    is performed on a mixture of compositable and non-compositable values.
+    This test mashes a non-compositable string value onto `variable` after
+    setting it to something compositable and amending it in an conditional.'''
+    YAMLET = '''# Yamlet
+    tp:
+      variable: !rel defaulted value
+      switch: off
+      !if switch == 'on':
+        variable: !rel specialized value
+      variable: colliding non-compositable value
+    '''
+    ctors = {'!rel': TestFlatCompositing.RelativeStringValue}
+    loader = yamlet.Loader(self.Opts(constructors=ctors))
+    with self.assertRaises(ConstructorError):
+      y = loader.load(YAMLET)
+
+  def test_specializing_conditions_non_relative_error_2(self):
+    '''As of Yamlet 0.5, it is only considered an error if a composite operation
+    is performed on a mixture of compositable and non-compositable values.
+    This test only introduces a non-compositable value in the true branch of
+    a conditional, so only that expression should error.'''
+    YAMLET = '''# Yamlet
+    tp:
+      variable: !rel defaulted value
+      switch: off
+      !if switch == 'on':
+        variable: colliding non-compositable value
+      variable: !rel another compositable value
+    boring: !expr tp
+    explosive: !expr tp {switch:'on'}
+    '''
+    ctors = {'!rel': TestFlatCompositing.RelativeStringValue}
+    loader = yamlet.Loader(self.Opts(constructors=ctors))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['tp']['variable'],
+                     'defaulted value another compositable value')
+    self.assertEqual(y['boring']['variable'],
+                     'defaulted value another compositable value')
+    with AssertRaisesCleanException(self, ValueError):
+      val = y['explosive']['variable']
+      self.fail(f'Did not throw an exception; got `{val}`')
+
+  def test_specializing_conditions_non_relative_allowed(self):
+    '''Overriding a non-compositable value with a conditional is always allowed.
+    '''
+    YAMLET = '''# Yamlet
+    tp:
+      variable: defaulted value
+      switch: off
+      !if switch == 'on':
+        variable: overriding value
+    boring: !expr tp
+    zesty: !expr tp {switch:'on'}
+    '''
+    ctors = {'!rel': TestFlatCompositing.RelativeStringValue}
+    loader = yamlet.Loader(self.Opts(constructors=ctors))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['tp']['variable'], 'defaulted value')
+    self.assertEqual(y['boring']['variable'], 'defaulted value')
+    self.assertEqual(y['zesty']['variable'], 'overriding value')
+
+  def test_specializing_conditions_non_relative_allowed_2(self):
+    '''Don't allow flat strings after an if-else ladder.'''
+    YAMLET = '''# Yamlet
+    tp:
+      variable: defaulted value
+      switch: off
+      !if switch == 'on':
+        variable: overriding value
+      variable: completely clobbering value
+    '''
+    ctors = {'!rel': TestFlatCompositing.RelativeStringValue}
+    loader = yamlet.Loader(self.Opts(constructors=ctors))
+    with self.assertRaises(ConstructorError):
+      y = loader.load(YAMLET)
+
 
 @ParameterizedOnOpts
 class TestRecursion(unittest.TestCase):
@@ -1163,6 +1263,61 @@ class TestRecursion(unittest.TestCase):
     with AssertRaisesCleanException(self, RecursionError, max_context=40):
       val = y['child']['parentvalue']
       self.fail(f'Did not throw an exception; got `{val}`')
+
+
+@ParameterizedOnOpts
+class TestExpressionMechanics(unittest.TestCase):
+  def test_unary_operators(self):
+    YAMLET = '''# Yamlet
+    add: !expr +10
+    sub: !expr -10
+    not: !expr not 10
+    neg: !expr ~10
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['add'], 10)
+    self.assertEqual(y['sub'], -10)
+    self.assertEqual(y['not'], False)
+    self.assertEqual(y['neg'], ~10)
+
+  def test_binary_operators(self):
+    YAMLET = '''# Yamlet
+    add:  !expr 10 + 89
+    sub:  !expr 89 - 10
+    mul:  !expr 12 * 12
+    div:  !expr 990 / 11
+    idiv: !expr 995 // 11
+    mod:  !expr 995 % 11
+    band: !expr 0xFF & 0x1F7
+    bor:  !expr 0xFF | 0x1F7
+    xor:  !expr 0xFF ^ 0x1F7
+    lsh:  !expr 0x1F7 << 4
+    rsh:  !expr 0x1F7 >> 4
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['add'],  10 + 89)
+    self.assertEqual(y['sub'],  89 - 10)
+    self.assertEqual(y['mul'],  12 * 12)
+    self.assertEqual(y['div'],  990 / 11)
+    self.assertEqual(y['idiv'], 995 // 11)
+    self.assertEqual(y['mod'],  995 % 11)
+    self.assertEqual(y['band'], 0xFF & 0x1F7)
+    self.assertEqual(y['bor'],  0xFF | 0x1F7)
+    self.assertEqual(y['xor'],  0xFF ^ 0x1F7)
+    self.assertEqual(y['lsh'],  0x1F7 << 4)
+    self.assertEqual(y['rsh'],  0x1F7 >> 4)
+
+  def test_fstring_concatenation(self):
+    YAMLET = '''# Yamlet
+    foo: Foo
+    bar: Bar
+    foobar: !expr f'{foo}{bar}'
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['foobar'], 'FooBar')
 
 
 @ParameterizedOnOpts
