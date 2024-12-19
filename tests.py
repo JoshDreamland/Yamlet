@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import tempfile
 import traceback
 import unittest
 import yamlet
@@ -1089,7 +1090,7 @@ class TestFlatCompositing(unittest.TestCase):
       else: ectx.Raise(
           f'Cannot composite {type(other).__name__} with RelativeStringValue')
 
-    def yamlet_clone(self, other):
+    def yamlet_clone(self, other, ectx):
       return TestFlatCompositing.RelativeStringValue(self.val)
 
     def __eq__(self, other):
@@ -1320,6 +1321,70 @@ class TestExpressionMechanics(unittest.TestCase):
     self.assertEqual(y['foobar'], 'FooBar')
 
 
+class TempModule:
+  def __init__(self, content, module_vars=None):
+    if isinstance(content, TempModule):
+      assert not module_vars
+      content, module_vars = content.content, content.module_vars
+    self.content, self.module_vars = content, module_vars or {}
+
+
+def TempFileRetriever(files):
+  def resolve_import(filename):
+    f = files.get(filename)
+    if not f: raise FileNotFoundError(f'No file `{filename}` registered')
+    if isinstance(f, yamlet.ImportInfo): return f
+    tm = TempModule(f)
+    with tempfile.NamedTemporaryFile(mode='w+t', delete=False) as tf:
+      tf.write(tm.content)
+      res = yamlet.ImportInfo(tf.name, module_vars=tm.module_vars)
+      files[f] = res
+      return res
+  return resolve_import
+
+
+@ParameterizedOnOpts
+class CrossModuleMechanics(unittest.TestCase):
+  def test_module_globals(self):
+    YAMLET = '''# Yamlet
+    ext1: !import test_file_1
+    ext2: !import test_file_2
+    ubiquitous_global: dest-scoped value
+    dest_only_global: 'Cool beans'
+    ext1_local:       !expr ext1.tup.ref_local
+    ext1_ubiquitous:  !expr ext1.tup.ref_ubiquitous_global
+    ext1_destonly:    !expr ext1.tup.ref_dest_global
+    ext1_module:      !expr ext1.tup.ref_module_global
+    ext2_module:      !expr ext2.tup.ref_module_global
+    ext1_tup: !expr ext1.tup {}
+    ext2_tup: !expr ext2.tup {}
+    '''
+    memfile = '''# Yamlet
+    my_own_var: Good night, moon!
+    ubiquitous_global: module-scoped value
+    tup:
+      ref_local: !expr my_own_var
+      ref_ubiquitous_global: !expr ubiquitous_global
+      ref_module_global: !expr module_specific_global
+      ref_dest_global: !expr dest_only_global
+    '''
+    loader = yamlet.Loader(self.Opts(import_resolver=TempFileRetriever({
+        'test_file_1': TempModule(memfile, {'module_specific_global': 'msg1'}),
+        'test_file_2': TempModule(memfile, {'module_specific_global': 'msg2'}),
+    }), globals={'module_specific_global': 'the catch-all'}))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['ext1_local'], 'Good night, moon!')
+    self.assertEqual(y['ext1_ubiquitous'], 'module-scoped value')
+    self.assertEqual(y['ext1_destonly'], 'Cool beans')
+    self.assertEqual(y['ext1_module'], 'msg1')
+    self.assertEqual(y['ext2_module'], 'msg2')
+    self.assertEqual(y['ext1_tup']['ref_local'], 'Good night, moon!')
+    self.assertEqual(y['ext1_tup']['ref_ubiquitous_global'], 'dest-scoped value')
+    self.assertEqual(y['ext1_tup']['ref_dest_global'], 'Cool beans')
+    self.assertEqual(y['ext1_tup']['ref_module_global'], 'msg1')
+    self.assertEqual(y['ext2_tup']['ref_module_global'], 'msg2')
+
+
 @ParameterizedOnOpts
 class GptsTestIdeas(unittest.TestCase):
   def test_chained_up_super(self):
@@ -1339,7 +1404,8 @@ class GptsTestIdeas(unittest.TestCase):
     '''
     loader = yamlet.Loader(self.Opts())
     y = loader.load(YAMLET)
-    self.assertEqual(y['t2']['sub']['subsub']['test'], 'base level1 level2 override')
+    self.assertEqual(y['t2']['sub']['subsub']['test'],
+                    'base level1 level2 override')
 
   def test_nested_nullification(self):
     YAMLET = '''# Yamlet

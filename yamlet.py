@@ -31,7 +31,7 @@ import token
 import tokenize
 import typing
 
-VERSION = '0.0.4'
+VERSION = '0.1.0'
 ConstructorError = ruamel.yaml.constructor.ConstructorError
 class YamletBaseException(Exception): pass
 
@@ -296,7 +296,7 @@ class Cloneable:
   All object references within a clone (such as parent pointers) should also be
   updated to point within the new cloned ecosystem.
   '''
-  def yamlet_clone(self, new_scope):
+  def yamlet_clone(self, new_scope, ectx):
     raise NotImplementedError(
         'A class which extends `yamlet.Cloneable` should implement '
         f'`yamlet_clone()`; `{type(self).__name__}` does not.')
@@ -397,11 +397,11 @@ class GclDict(dict, Compositable):
           v1.yamlet_merge(v, ectx)
           v = v1
         else:
-          v = v.yamlet_clone(self)
+          v = v.yamlet_clone(self, ectx)
           super().__setitem__(k, v)
         assert v._gcl_parent_ is self
       elif isinstance(v, Cloneable):
-        super().__setitem__(k, v.yamlet_clone(self))
+        super().__setitem__(k, v.yamlet_clone(self, ectx))
       elif v or (v not in (null, external, _undefined)):
         self._gcl_provenances_[k] = other._gcl_provenances_.get(k, other)
         super().__setitem__(k, v)
@@ -414,11 +414,12 @@ class GclDict(dict, Compositable):
 
     for k, v in other._gcl_preprocessors_.items():
       if k not in self._gcl_preprocessors_:
-        self._gcl_preprocessors_[k] = v.yamlet_clone(self)
+        self._gcl_preprocessors_[k] = v.yamlet_clone(self, ectx)
     self._gcl_preprocess_(ectx)
 
   def _gcl_preprocess_(self, ectx):
-    ectx = ectx.Branch('Yamlet Preprocessing', ectx._trace_point, self)
+    ectx = ectx.Branch('Yamlet Preprocessing', ectx._trace_point, self,
+                       constrain_scope=True)
     for _, v in self._gcl_preprocessors_.items():
       v._gcl_preprocess_(ectx)
     erased = set()
@@ -427,14 +428,14 @@ class GclDict(dict, Compositable):
         erased.add(k)
     for k in erased: super().pop(k)
 
-  def yamlet_clone(self, new_scope):
-    cloned_preprocessors = {k: v.yamlet_clone(new_scope)
+  def yamlet_clone(self, new_scope, ectx):
+    cloned_preprocessors = {k: v.yamlet_clone(new_scope, ectx)
                             for k, v in self._gcl_preprocessors_.items()}
     res = GclDict(gcl_parent=new_scope, gcl_super=self,
                   gcl_opts=self._gcl_opts_, preprocessors=cloned_preprocessors,
-                  yaml_point=self._yaml_point_)
+                  yaml_point=ectx.GetPoint())
     for k, v in self._gcl_noresolve_items_():
-      if isinstance(v, Cloneable): v = v.yamlet_clone(res)
+      if isinstance(v, Cloneable): v = v.yamlet_clone(res, ectx)
       res.__setitem__(k, v)
     return res
 
@@ -509,7 +510,8 @@ class YamlPoint:
 
 
 class _EvalContext:
-  def __init__(self, scope, opts, yaml_point, name, parent=None, deferred=None):
+  def __init__(self, scope, opts, yaml_point, name, parent=None, deferred=None,
+               constrain_scope=False):
     self.scope = scope
     self.opts = opts
     self._trace_point = _EvalContext._TracePoint(yaml_point, name)
@@ -517,6 +519,7 @@ class _EvalContext:
     self._parent = parent
     self._children = None
     self._name_deps = None
+    self._constrain_scope = constrain_scope
 
   def _PrettyError(tace_item):
     if tace_item.name: return f'{tace_item.name}\n{tace_item.start}'
@@ -546,9 +549,10 @@ class _EvalContext:
         preprocessors={},
         yaml_point=self._trace_point)
 
-  def Branch(self, name, yaml_point, scope):
+  def Branch(self, name, yaml_point, scope, constrain_scope=False):
     return self._TrackChild(
-        _EvalContext(scope, self.opts, yaml_point, name, parent=self))
+        _EvalContext(scope, self.opts, yaml_point, name, parent=self,
+                     constrain_scope=constrain_scope))
 
   def BranchForNameResolution(self, lookup_description, lookup_key, scope):
     return self._TrackNameDep(lookup_key,
@@ -562,6 +566,17 @@ class _EvalContext:
     return self._TrackChild(
         _EvalContext(self.scope, self.opts, deferred_object._yaml_point_,
                      description, parent=self, deferred=deferred_object))
+
+  def UpScope(self):
+    pscope = self.scope
+    up = self._parent
+    assert up is not self
+    while up:
+      if up._constrain_scope: return None
+      if up.scope is not pscope: return up if up.scope is not None else None
+      assert up is not up._parent
+      up = up._parent
+    return None
 
   def _TrackChild(self, child):
     if self._children: self._children.append(child)
@@ -666,7 +681,7 @@ class DeferredValue(Cloneable):
       self._gcl_cache_ = res
     return self._gcl_cache_
 
-  def yamlet_clone(self, new_scope):
+  def yamlet_clone(self, new_scope, ectx):
     return type(self)(self._gcl_construct_, self._yaml_point_)
 
   def _gcl_is_undefined_(self, ectx): return False
@@ -695,7 +710,7 @@ class ModuleToLoad(DeferredValue):
     else: final_path = import_info
     fn = pathlib.Path(final_path)
     if not fn.exists():
-      if value == fn:
+      if str(value) == str(fn):
         ectx.Raise(FileNotFoundError, f'Could not import Yamlet file: {value}')
       ectx.Raise(FileNotFoundError,
                  f'Could not import Yamlet file: `{fn}`\n'
@@ -731,7 +746,7 @@ class DeferredValueWrapper(DeferredValue):
     self.klass = klass
   def _gcl_evaluate_(self, value, ectx):
     return self.klass(super()._gcl_evaluate_(value, ectx))
-  def yamlet_clone(self, new_scope):
+  def yamlet_clone(self, new_scope, ectx):
     return type(self)(self.klass, self._gcl_construct_, self._yaml_point_)
 class StringToSubAndWrap(DeferredValueWrapper, StringToSubstitute): pass
 class ExprToEvalAndWrap(DeferredValueWrapper, ExpressionToEvaluate): pass
@@ -781,9 +796,9 @@ class IfLadderItem(DeferredValue):
     while isinstance(result, DeferredValue): result = result._gcl_resolve_(ectx)
     return result
 
-  def yamlet_clone(self, new_scope):
+  def yamlet_clone(self, new_scope, ectx):
     return IfLadderItem((self._gcl_construct_[0], [
-        e.yamlet_clone(new_scope) if isinstance(e, Cloneable) else e
+        e.yamlet_clone(new_scope, ectx) if isinstance(e, Cloneable) else e
         for i, e in enumerate(self._gcl_construct_[1])]), self._yaml_point_)
 
   def _gcl_update_parent_(self, parent):
@@ -835,9 +850,9 @@ class FlatCompositor(DeferredValue):
   def add_compositing_value(self, value): self._gcl_construct_.append(value)
   def latest_compositing_value(self): return self._gcl_construct_[-1]
 
-  def yamlet_clone(self, new_scope):
+  def yamlet_clone(self, new_scope, ectx):
     return FlatCompositor(
-        [v.yamlet_clone(new_scope) if isinstance(v, Cloneable) else v
+        [v.yamlet_clone(new_scope, ectx) if isinstance(v, Cloneable) else v
             for v in self._gcl_construct_], self._yaml_point_,
             varname=self._gcl_varname_)
 
@@ -886,7 +901,7 @@ class PreprocessingTuple(DeferredValue, Compositable):
     assert(isinstance(tup, GclDict))
     super().__init__(tup, yaml_point or tup._yaml_point_)
   def _gcl_explanation_(self):
-    return f'Preprocessing Yamlet tuple literal'
+    return f'Preprocessing Yamlet tuple'
   def _gcl_evaluate_(self, value, ectx):
     value._gcl_preprocess_(ectx)
     return value
@@ -902,8 +917,9 @@ class PreprocessingTuple(DeferredValue, Compositable):
       return self._gcl_construct_._gcl_preprocessors_
     raise AttributeError(f'PreprocessingTuple has no attribute `{attr}`')
   def __eq__(self, other): return self._gcl_construct_ == other
-  def yamlet_clone(self, new_scope):
-    return PreprocessingTuple(self._gcl_construct_.yamlet_clone(new_scope))
+  def yamlet_clone(self, new_scope, ectx):
+    return PreprocessingTuple(
+        self._gcl_construct_.yamlet_clone(new_scope, ectx))
   def yamlet_merge(self, other, ectx):
     self._gcl_construct_.yamlet_merge(other, ectx)
 
@@ -980,7 +996,7 @@ class PreprocessingDirective():
   def __init__(self, data, yaml_point):
     self._gcl_construct_ = data
     self._yaml_point_ = yaml_point
-  def yamlet_clone(self, new_scope):
+  def yamlet_clone(self, new_scope, ectx):
     raise NotImplementedError(
         f'Internal error: clone() not implemented in {type(self).__name__}')
   def _gcl_preprocess_(self, ectx):
@@ -1046,10 +1062,10 @@ class YamletIfElseLadder(PreprocessingDirective):
 
   def _gcl_preprocess_(self, ectx): pass
 
-  def yamlet_clone(self, new_scope):
+  def yamlet_clone(self, new_scope, ectx):
     return YamletIfElseLadder(
-        index=self.index.yamlet_clone(new_scope),
-        cond_dvals=[dv.yamlet_clone(new_scope) for dv in self.cond_dvals])
+        index=self.index.yamlet_clone(new_scope, ectx),
+        cond_dvals=[dv.yamlet_clone(new_scope, ectx) for dv in self.cond_dvals])
 
 
 def _FlatCompositingType(v):
@@ -1121,7 +1137,7 @@ def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point):
           raise cErr(f'Duplicate tuple key `{k}` with non-mergeable value type '
                      f'`{_FlatCompositingType(v).__name__}` follows a value '
                      f'with type `{_FlatCompositingType(v0).__name__}`: '
-                     ' this is defined to be an error in Yamlet 0.5')
+                     ' this is defined to be an error in Yamlet 0.1.0')
         if isinstance(v0, FlatCompositor): v0.add_compositing_value(v)
         else: filtered_pairs[k] = FlatCompositor([v0, v], yaml_point, varname=k)
   terminateIfDirective()
@@ -1297,7 +1313,6 @@ def _GclNameLookup(name, ectx, top=True):
     with ectx.Scope(ectx.scope._gcl_parent_):
       res = _GclNameLookup(name, ectx, top=False)
       if res is not _undefined: return res
-  if not top: return _undefined
   sup = ectx.scope._gcl_super_
   while sup is not None:
     if sup._gcl_parent_:
@@ -1305,12 +1320,22 @@ def _GclNameLookup(name, ectx, top=True):
         res = _GclNameLookup(name, ectx, top=False)
         if res is not _undefined: return res
     sup = sup._gcl_super_
+  if not top: return _undefined
+  # Only at the topmost scope: check module locals next.
   mvars = ectx.opts.module_vars.get(ectx.ModuleFilename())
   if mvars:
     res = mvars.get(name, _undefined)
     if res is not _undefined: return res
+  # We've checked everything in the current context. Go up a context.
+  upctx = ectx.UpScope()
+  while upctx:
+    try: res = _GclNameLookup(name, upctx, top=False)
+    except Exception as e: print(e)
+    if res is not _undefined: return res
+    upctx = upctx.UpScope()
+  # All parse-wide globals from YamletOptions
   res = ectx.opts.globals.get(name, _undefined)
-  if res is not _undefined: return ectx.opts.globals[name]
+  if res is not _undefined: return res
   err = f'There is no variable called `{name}` in this scope.'
   mnv = ectx.opts.missing_name_value
   if mnv is not YamletOptions.Error:
@@ -1479,7 +1504,12 @@ def EvalGclAst(et, ectx):
         return fun(ectx, *fun_args, **fun_kwargs)
       fun_args = [EvalGclAst(arg, ectx) for arg in fun_args]
       fun_kwargs = {k: EvalGclAst(v, ectx) for k, v in fun_kwargs.items()}
-      return fun(*fun_args, **fun_kwargs)
+      try: return fun(*fun_args, **fun_kwargs)
+      except Exception as e:
+        if isinstance(e, YamletBaseException): raise
+        ectx.Raise(type(e),
+            f'An exception occurred during a Yamlet call to a function '
+            f'`{fun.__name__}`: {e}', e)
 
     case ast.Subscript:
       v = ev(et.value)
@@ -1537,5 +1567,5 @@ def _CompositeGclTuples(tuples, ectx):
   for t in tuples:
     if t is None: ectx.Raise(ValueError, 'Expression evaluation failed?')
     if res: res.yamlet_merge(t, ectx)
-    else:   res = t.yamlet_clone(ectx.scope)
+    else:   res = t.yamlet_clone(ectx.scope, ectx)
   return res
