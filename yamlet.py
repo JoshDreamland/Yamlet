@@ -31,7 +31,7 @@ import token
 import tokenize
 import typing
 
-VERSION = '0.1.0'
+VERSION = '0.1.1'
 ConstructorError = ruamel.yaml.constructor.ConstructorError
 class YamletBaseException(Exception): pass
 
@@ -125,6 +125,8 @@ class Loader(ruamel.yaml.YAML):
     yc.add_constructor("!fmt",       ConstructScalar(StringToSubstitute))
     yc.add_constructor("!expr",      ConstructScalar(ExpressionToEvaluate))
     yc.add_constructor("!lambda",    ConstructScalar(GclLambda))
+    yc.add_constructor("!local",     ConstructScalar(GclLocalKey))
+    yc.add_constructor("!template",  self.ConstructGclTemplate)
     yc.add_constructor("!if",        ConstructScalar(YamletIfStatement))
     yc.add_constructor("!elif",      ConstructScalar(YamletElifStatement))
     yc.add_constructor("!else",      Loader._ConstructElse)
@@ -196,7 +198,20 @@ class Loader(ruamel.yaml.YAML):
     try:
       return ProcessYamlPairs(
           loader.construct_pairs(node), gcl_opts=self.yamlet_options,
-          yaml_point=YamlPoint(start=node.start_mark, end=node.end_mark))
+          yaml_point=YamlPoint(start=node.start_mark, end=node.end_mark),
+          is_template=False)
+    except Exception as e:
+      if isinstance(e, ConstructorError): raise
+      raise ConstructorError(None, None,
+          f'Yamlet error while processing dictionary: {str(e)}',
+          node.start_mark) from e
+
+  def ConstructGclTemplate(self, loader, node):
+    try:
+      return ProcessYamlPairs(
+          loader.construct_pairs(node), gcl_opts=self.yamlet_options,
+          yaml_point=YamlPoint(start=node.start_mark, end=node.end_mark),
+          is_template=True)
     except Exception as e:
       if isinstance(e, ConstructorError): raise
       raise ConstructorError(None, None,
@@ -324,14 +339,18 @@ class Compositable(Cloneable):
 
 
 class GclDict(dict, Compositable):
-  def __init__(self, *args,
-               gcl_parent, gcl_super, gcl_opts, yaml_point, preprocessors):
+  def __init__(self, *args, gcl_locals,
+               gcl_parent, gcl_super, gcl_opts, yaml_point, preprocessors,
+               gcl_is_template):
     super().__init__(*args)
     self._gcl_parent_ = gcl_parent
     self._gcl_super_ = gcl_super
     self._gcl_opts_ = gcl_opts
+    assert isinstance(gcl_locals, dict)
     assert isinstance(preprocessors, dict)
+    self._gcl_locals_ = gcl_locals
     self._gcl_preprocessors_ = preprocessors
+    self._gcl_is_template_ = gcl_is_template
     self._gcl_provenances_ = {}
     self._yaml_point_ = yaml_point
 
@@ -389,8 +408,9 @@ class GclDict(dict, Compositable):
                 'Expected dict-like type to composite.', ex_class=TypeError)
     for k, v in other._gcl_noresolve_items_():
       if isinstance(v, Compositable):
-        v1 = super().setdefault(k, None)
-        if v1 is not None:
+        v1 = self._gcl_locals_.get(k, _undefined)
+        if v1 is _undefined: v1 = super().setdefault(k, _undefined)
+        if v1 is not _undefined:
           if not isinstance(v1, Compositable):
             ectx.Raise(TypeError, f'Cannot composite `{type(v1)}` object `{k}` '
                                    'with dictionary value in extending tuple.')
@@ -398,13 +418,15 @@ class GclDict(dict, Compositable):
           v = v1
         else:
           v = v.yamlet_clone(self, ectx)
-          super().__setitem__(k, v)
+          self._gcl_kv_assign_(k, v)
         assert v._gcl_parent_ is self
       elif isinstance(v, Cloneable):
-        super().__setitem__(k, v.yamlet_clone(self, ectx))
+        self._gcl_kv_assign_(k, v.yamlet_clone(self, ectx))
+      # NOTE: These other values will not have provenance info attached from a
+      # merge or clone operation, as the assignments above do.
       elif v or (v not in (null, external, _undefined)):
         self._gcl_provenances_[k] = other._gcl_provenances_.get(k, other)
-        super().__setitem__(k, v)
+        self._gcl_kv_assign_(k, v)
       elif v is null:
         self._gcl_provenances_[k] = other._gcl_provenances_.get(k, other)
         super().pop(k, None)
@@ -416,6 +438,10 @@ class GclDict(dict, Compositable):
       if k not in self._gcl_preprocessors_:
         self._gcl_preprocessors_[k] = v.yamlet_clone(self, ectx)
     self._gcl_preprocess_(ectx)
+
+  def _gcl_kv_assign_(self, k, v):
+    if k in self._gcl_locals_: self._gcl_locals_[k] = v
+    else: super().__setitem__(k, v)
 
   def _gcl_preprocess_(self, ectx):
     ectx = ectx.Branch('Yamlet Preprocessing', ectx._trace_point, self,
@@ -431,12 +457,15 @@ class GclDict(dict, Compositable):
   def yamlet_clone(self, new_scope, ectx):
     cloned_preprocessors = {k: v.yamlet_clone(new_scope, ectx)
                             for k, v in self._gcl_preprocessors_.items()}
-    res = GclDict(gcl_parent=new_scope, gcl_super=self,
+    res = GclDict(gcl_parent=new_scope, gcl_super=self, gcl_locals={},
                   gcl_opts=self._gcl_opts_, preprocessors=cloned_preprocessors,
-                  yaml_point=ectx.GetPoint())
+                  gcl_is_template=False, yaml_point=ectx.GetPoint())
     for k, v in self._gcl_noresolve_items_():
       if isinstance(v, Cloneable): v = v.yamlet_clone(res, ectx)
       res.__setitem__(k, v)
+    for k, v in self._gcl_locals_.items():
+      if isinstance(v, Cloneable): v = v.yamlet_clone(res, ectx)
+      res._gcl_locals_[k] = v
     return res
 
   def evaluate_fully(self, ectx=None):
@@ -448,7 +477,9 @@ class GclDict(dict, Compositable):
       while isinstance(v, DeferredValue): v = v._gcl_resolve_(ectx)
       if isinstance(v, GclDict): v = v.evaluate_fully(ectx)
       return v
-    return {k: ev(v) for k, v in self._gcl_noresolve_items_()}
+    def excl(k, v):
+      return isinstance(v, (GclDict, PreprocessingTuple)) and v._gcl_is_template_
+    return {k: ev(v) for k, v in self._gcl_noresolve_items_() if not excl(k, v)}
 
   def _gcl_update_parent_(self, parent): self._gcl_parent_ = parent
   def _gcl_noresolve_values_(self): return super().values()
@@ -546,7 +577,9 @@ class _EvalContext:
         gcl_parent=gcl_parent or self.scope,
         gcl_super=gcl_super,
         gcl_opts=self.opts,
+        gcl_locals={},
         preprocessors={},
+        gcl_is_template=False,
         yaml_point=self._trace_point)
 
   def Branch(self, name, yaml_point, scope, constrain_scope=False):
@@ -915,6 +948,7 @@ class PreprocessingTuple(DeferredValue, Compositable):
     if attr == '_gcl_provenances_': return self._gcl_construct_._gcl_provenances_
     if attr == '_gcl_preprocessors_':
       return self._gcl_construct_._gcl_preprocessors_
+    if attr == '_gcl_is_template_': return self._gcl_construct_._gcl_is_template_
     raise AttributeError(f'PreprocessingTuple has no attribute `{attr}`')
   def __eq__(self, other): return self._gcl_construct_ == other
   def yamlet_clone(self, new_scope, ectx):
@@ -1005,6 +1039,9 @@ class PreprocessingDirective():
     )
 
 
+class GclLocalKey(PreprocessingDirective): pass
+
+
 class YamletIfStatement(PreprocessingDirective): pass
 class YamletElifStatement(PreprocessingDirective): pass
 class YamletElseStatement(PreprocessingDirective): pass
@@ -1085,9 +1122,10 @@ def _OkayToFlatComposite(v1, v2):
   return not one_okay
 
 
-def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point):
+def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point, is_template):
   filtered_pairs = {}
   preprocessors = {}
+  gcl_locals = {}
   if_directive = None
   cErr = lambda msg, v=None: ConstructorError(
              None, None, msg,
@@ -1121,6 +1159,11 @@ def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point):
           raise cErr('`!else` directive is not paired to an `!if` directive', k)
         if_directive.PutElse(k, v)
         terminateIfDirective()
+      elif isinstance(k, GclLocalKey):
+        terminateIfDirective()
+        gcl_locals[k._gcl_construct_] = v
+      else: raise cErr(f'Internal error: partially-implemented Yamlet directive'
+                       f' `{type(k).__name__}`')
     elif isinstance(k, DeferredValue):
       terminateIfDirective()
       # XXX: Fringe use-case would be to allow a kind of "!const" tag to
@@ -1141,9 +1184,10 @@ def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point):
         if isinstance(v0, FlatCompositor): v0.add_compositing_value(v)
         else: filtered_pairs[k] = FlatCompositor([v0, v], yaml_point, varname=k)
   terminateIfDirective()
-  res = GclDict(filtered_pairs,
+  res = GclDict(filtered_pairs, gcl_locals=gcl_locals,
                 gcl_parent=None, gcl_super=None, gcl_opts=gcl_opts,
-                preprocessors=preprocessors, yaml_point=yaml_point)
+                preprocessors=preprocessors, gcl_is_template=is_template,
+                yaml_point=yaml_point)
   _UpdateParents(res._gcl_noresolve_values_(), res)
   preprocess_everything = (
       gcl_opts.debugging.preprocessing == _DebugOpts.PREPROCESS_EVERYTHING)
@@ -1302,6 +1346,7 @@ _BUILTIN_VARS = {
 
 
 def _GclNameLookup(name, ectx, top=True):
+  '''Main lookup and scope resolution mechanism.'''
   if name in _BUILTIN_NAMES: return _BUILTIN_NAMES[name](ectx)
   if name in _BUILTIN_VARS: return _BUILTIN_VARS[name]
   if name in ectx.scope:
@@ -1309,6 +1354,11 @@ def _GclNameLookup(name, ectx, top=True):
     if get is external:
       ectx.Raise(ValueError, f'`{name}` is external in this scope')
     if get is not null: return get
+  res = ectx.scope._gcl_locals_.get(name, _undefined)
+  if res is not _undefined and res is not null:
+    if res is external:
+      ectx.Raise(ValueError, f'`{name}` is external in this scope')
+    return res
   if ectx.scope._gcl_parent_:
     with ectx.Scope(ectx.scope._gcl_parent_):
       res = _GclNameLookup(name, ectx, top=False)
@@ -1389,7 +1439,10 @@ def EvalGclAst(et, ectx):
   ev = lambda x: EvalGclAst(x, ectx)
   match type(et):
     case ast.Expression: return ev(et.body)
-    case ast.Name: return _GclNameLookup(et.id, ectx)
+    case ast.Name:
+      res = _GclNameLookup(et.id, ectx)
+      while isinstance(res, DeferredValue): res = res._gcl_resolve_(ectx)
+      return res
     case ast.Constant:
       if isinstance(et.value, str):
         return _ResolveStringValue(et.value, ectx)

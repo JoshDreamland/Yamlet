@@ -81,6 +81,8 @@ Here’s a summary of Yamlet’s features:
 - [Lambda expressions](#lambda-expressions)
 - [Custom functions](#custom-functions) (defined in Python)
 - [Custom tags](#custom-tags) for building user-defined types.
+- [Local Variables and Templates](#local-variables-and-templates) to control
+  which values are exposed to the Python API.
 - [GCL Special Values](#gcl-special-values) `null` and `external`.
 - Explicit [value referencing](#scoping-quirks) in composited tuples using
   `up`/`super`
@@ -441,6 +443,69 @@ registering the constructor to set the default behavior of the base tag
 set `tag_compositing=False`.
 
 
+### Local Variables and Templates
+
+Sometimes you want to control which values are exposed by for-loops or even
+explicit access in the fully-parsed configuration (i.e. the tuple returned by
+`load(yamlet_config)` or the dict obtained by calling `evaluate_fully()` on
+that tuple).
+
+For this, you can use local expressions:
+
+```yaml
+!local var_that_will_not_show_up: Hello, world!
+!local var_that_would_error: !expr undefined varnames with bad syntax
+var_that_will_show_up: !expr var_that_will_not_show_up
+```
+
+Then in Python, the fully-evaluated tuple will contain no locals:
+```py
+t = yamlet.load(yamlet_config)
+self.assertEqual(t.evaluate_fully(),
+                 {'var_that_will_show_up': 'Hello, world!'})
+```
+
+This will remain the case even if additional values (*not* marked `!local`) are
+composited into that tuple. For example:
+
+```yaml
+tup1:
+  !local my_local: irrelevant
+  my_nonlocal: !fmt 'Hello, {my_local}!'
+tup2: !composite
+  - tup1
+  - my_local: world
+```
+
+In this case, the following assertion would succeed:
+```py
+self.assertEqual(parsed_config['tup2'].evaluate_fully(),
+                 {'my_nonlocal': 'Hello, world!'})
+```
+
+Additionally, you may use the `!template` type for tuples (YAML mapping values)
+which should only be used for composing other tuples (and will also not be
+exported). Because Yamlet lazily-evaluates everything, there is no observable
+distinction between templates and non-template tuples outside of this behavior.
+
+As an example:
+
+```yaml
+library_template: !template
+  !local STATIC_LIB_PREFIX: !expr ('s' if platform == 'windows' else '')
+  static_libs: !expr |
+      ['{LIB_PREFIX}{STATIC_LIB_PREFIX}{name}.{STATIC_LIB_EXT}' for name in lib_names]
+  dynamic_libs: !expr |
+      ['{LIB_PREFIX}{name}.{SHARED_LIB_EXT}' for name in lib_names]
+  !local lib_names: !external
+```
+
+When observed from the Python API, accessing the `library_template` will return
+the template tuple, even though it would not appear in the dict returned by
+`evaluate_fully`. However, accessing the `lib_names` field on that template will
+raise a `KeyError`. This behavior may be modified in a later version of Yamlet.
+
+
 ### GCL Special Values
 
 In addition to `up` and `super`, GCL defines the special values `null` and
@@ -636,13 +701,14 @@ as well; this expression creates a new tuple in the current scope.
 
 There are a few features present in GCL that Yamlet currently doesn’t implement:
 - Assertions are not yet supported.
-- Additional builtin functions (`substr`, `tail`, etc.).
+- Additional builtin functions (`substr`, `tail`, etc.). The Python built-ins
+  and available list comprehensions pretty much suffice for this.
 - GCL-style (C++/C-style) comments cannot be used anywhere in Yamlet.
   Yamlet uses Python/YAML-style comments, as handled by Ruamel.
 - The `args` tuple is not supported. This would ideally be the responsibility
   of a command-line utility that preprocesses Yamlet into some other format
   (such as Protobuf).
-- Support for `final` and `local` expressions is missing.
+- Support for `final` expressions is missing.
   The language might be better without these... though adding them could create
   a way to reliably pre-evaluate entire Yamlet files into other formats.
 

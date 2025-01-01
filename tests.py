@@ -30,7 +30,7 @@ def ParameterizedOnOpts(klass):
   NormalCacheClass = mkclass(f'{klass.__name__}_DefCaching', YO.CACHE_VALUES)
   DebugCacheClass = mkclass(f'{klass.__name__}_DebugCaching',
                             YO.CACHE_DEBUG, traces=YDO.TRACE_PRETTY)
-  DebugAllClass = mkclass(f'{klass.__name__}_DebugAll',
+  DebugAllClass = mkclass(f'{klass.__name__}_PreprocessAll',
                           YO.CACHE_DEBUG, YDO.PREPROCESS_EVERYTHING)
 
   # Add the new classes to the global scope for unittest to pick up
@@ -1718,6 +1718,104 @@ class RunExample(unittest.TestCase):
     loader = yamlet.Loader(self.Opts())
     t = loader.load(YAMLET)
     self.assertEqual(t['fishes'], '1 fish, 2 fish, red fish, blue fish')
+
+  def test_locals_example_from_readme(self):
+    yamlet_config = '''# Yamlet
+    !local var_that_will_not_show_up: Hello, world!
+    !local var_that_would_error: !expr undefined varnames with bad syntax
+    var_that_will_show_up: !expr var_that_will_not_show_up
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(yamlet_config)
+    self.assertEqual(t.evaluate_fully(),
+                     {'var_that_will_show_up': 'Hello, world!'})
+    # Repeat the above experiment using the exact wording from the readme
+    t = yamlet.load(yamlet_config)
+    self.assertEqual(t.evaluate_fully(),
+                     {'var_that_will_show_up': 'Hello, world!'})
+
+  def test_locals_example_from_readme_second(self):
+    yamlet_config = '''# Yamlet
+    tup1:
+      !local my_local: irrelevant
+      my_nonlocal: !fmt 'Hello, {my_local}!'
+    tup2: !composite
+      - tup1
+      - my_local: world
+    '''
+    loader = yamlet.Loader(self.Opts())
+    parsed_config = loader.load(yamlet_config)
+    self.assertEqual(parsed_config['tup2'].evaluate_fully(),
+                     {'my_nonlocal': 'Hello, world!'})
+
+
+@ParameterizedOnOpts
+class FieldTests(unittest.TestCase):
+  def test_icu_library_description(self):
+    YAMLET = '''# Yamlet
+    !local LIB_PREFIX: 'lib'
+    !local STATIC_LIB_EXT: 'a'
+    !local SHARED_LIB_EXT: 'so'
+    icu_lib_template: !template
+      !local STATIC_LIB_PREFIX: !expr ('s' if 'linux' == 'windows' else '')
+      static_libs: !expr |
+          ['{LIB_PREFIX}{STATIC_LIB_PREFIX}{name}.{STATIC_LIB_EXT}' for name in lib_names]
+      dynamic_libs: !expr |
+          ['{LIB_PREFIX}{name}.{SHARED_LIB_EXT}' for name in lib_names]
+      !local lib_names: !external
+
+    module_libs:
+      icu:
+        version: 50.2.0.R
+        provides:
+          icu-i18n: !expr |
+              icu_lib_template { lib_names: ['icuin', 'icuuc', 'icudt'] }
+          icu-io: !composite
+            - icu_lib_template
+            - lib_names: ['icuio', 'icuin', 'icuuc', 'icudt']
+          icu-le: !composite
+            - icu_lib_template
+            - lib_names:
+              - icule
+              - icuuc
+              - icudt
+          icu-lx: !composite
+            - icu_lib_template
+            - lib_names: ['iculx', 'icule', 'icuuc', 'icudt']
+          icu-uc: !composite
+            - icu_lib_template
+            - lib_names: ['icule', 'icuuc', 'icudt']
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertDictEqual(t.evaluate_fully(), {
+      'module_libs': {
+        'icu': {
+          'version': '50.2.0.R',
+          'provides': {
+            'icu-i18n': {
+              'static_libs': ['libicuin.a', 'libicuuc.a', 'libicudt.a'],
+              'dynamic_libs': ['libicuin.so', 'libicuuc.so', 'libicudt.so'],
+            },
+            'icu-io': {
+              'static_libs': ['libicuio.a', 'libicuin.a', 'libicuuc.a', 'libicudt.a'],
+              'dynamic_libs': ['libicuio.so', 'libicuin.so', 'libicuuc.so', 'libicudt.so'],
+            }, 'icu-le': {
+              'static_libs': ['libicule.a', 'libicuuc.a', 'libicudt.a'],
+              'dynamic_libs': ['libicule.so', 'libicuuc.so', 'libicudt.so'],
+            }, 'icu-lx': {
+              'static_libs': ['libiculx.a', 'libicule.a', 'libicuuc.a', 'libicudt.a'],
+              'dynamic_libs': ['libiculx.so', 'libicule.so', 'libicuuc.so', 'libicudt.so'],
+            },
+            'icu-uc': {
+              'static_libs': ['libicule.a', 'libicuuc.a', 'libicudt.a'],
+              'dynamic_libs': ['libicule.so', 'libicuuc.so', 'libicudt.so'],
+            }
+          }
+        }
+      }
+    })
+
 
 
 @ParameterizedOnOpts
