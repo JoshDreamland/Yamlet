@@ -10,6 +10,32 @@ import yamlet
 from contextlib import contextmanager
 from ruamel.yaml.constructor import ConstructorError
 
+
+class RelativeStringValue(yamlet.Compositable):
+  def __init__(self, loader_or_str, node_if_loader=None):
+    if node_if_loader:
+      self.val = str(loader_or_str.construct_scalar(node_if_loader))
+    else:
+      self.val = loader_or_str
+
+  def yamlet_merge(self, other, ectx):
+    if isinstance(other, str): self.val = f'{self.val} {other}'.strip()
+    elif isinstance(other, RelativeStringValue):
+      self.val = f'{self.val} {other.val}'.strip()
+    else: ectx.Raise(
+        f'Cannot composite {type(other).__name__} with RelativeStringValue')
+
+  def yamlet_clone(self, other, ectx):
+    return RelativeStringValue(self.val)
+
+  def __eq__(self, other):
+    if isinstance(other, str): return self.val == other
+    return self.val == other.val
+
+  def __repr__(self): return f'RelativeStringValue({self.val!r})'
+  def __str__(self): return f'{self.val}'
+
+
 def ParameterizedOnOpts(klass):
   YO = yamlet.YamletOptions
   YDO = yamlet._DebugOpts
@@ -972,6 +998,64 @@ class TestConditionals(unittest.TestCase):
     self.assertEqual(y['food'], 'pellet')
     self.assertEqual(y.keys(), {'food'})
 
+  def test_local_in_if(self):
+    YAMLET = '''# Yamlet
+    !if 1 + 1 == 2:
+      !local my_var: Hello
+    v: !fmt '{my_var}, world!'
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['v'], 'Hello, world!')
+    self.assertEqual(y.evaluate_fully(), {'v': 'Hello, world!'})
+
+  def test_local_outside_if(self):
+    YAMLET = '''# Yamlet
+    !local my_var: oops
+    !if 1 + 1 == 2:
+      my_var: Hello
+    v: !fmt '{my_var}, world!'
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['v'], 'Hello, world!')
+    self.assertEqual(y.evaluate_fully(), {'v': 'Hello, world!'})
+
+  def test_local_inside_and_outside_if(self):
+    YAMLET = '''# Yamlet
+    !local my_var: oops
+    !if 1 + 1 == 2:
+      !local my_var: Hello
+    v: !fmt '{my_var}, world!'
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['v'], 'Hello, world!')
+    self.assertEqual(y.evaluate_fully(), {'v': 'Hello, world!'})
+
+  def test_nonlocal_outside_if(self):
+    YAMLET = '''# Yamlet
+    my_var: oops
+    !if 1 + 1 == 2:
+      !local my_var: Hello
+    v: !fmt '{my_var}, world!'
+    '''
+    with self.assertRaises(ConstructorError):
+      loader = yamlet.Loader(self.Opts())
+      y = loader.load(YAMLET)
+      self.assertEqual(y['v'], 'Hello, world!')
+      self.assertEqual(y.evaluate_fully(), {'v': 'Hello, world!'})
+
+  def test_get_from_if(self):
+    YAMLET = '''# Yamlet
+    !if 1 + 1 == 2:
+      !local my_var: Hello
+    v: !fmt '{my_var}, world!'
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y.get('v', 'oops!'), 'Hello, world!')
+
 
 @ParameterizedForStress
 class TestStress(unittest.TestCase):
@@ -1076,29 +1160,6 @@ class AssertRaisesCleanException:
 
 @ParameterizedOnOpts
 class TestFlatCompositing(unittest.TestCase):
-  class RelativeStringValue(yamlet.Compositable):
-    def __init__(self, loader_or_str, node_if_loader=None):
-      if node_if_loader:
-        self.val = str(loader_or_str.construct_scalar(node_if_loader))
-      else:
-        self.val = loader_or_str
-
-    def yamlet_merge(self, other, ectx):
-      if isinstance(other, str): self.val = f'{self.val} {other}'.strip()
-      elif isinstance(other, TestFlatCompositing.RelativeStringValue):
-        self.val = f'{self.val} {other.val}'.strip()
-      else: ectx.Raise(
-          f'Cannot composite {type(other).__name__} with RelativeStringValue')
-
-    def yamlet_clone(self, other, ectx):
-      return TestFlatCompositing.RelativeStringValue(self.val)
-
-    def __eq__(self, other):
-      if isinstance(other, str): return self.val == other
-      return self.val == other.val
-
-    def __repr__(self): return f'RelativeStringValue({self.val!r})'
-
   def test_specializing_conditions(self):
     YAMLET = '''# Yamlet
     tp:
@@ -1125,7 +1186,7 @@ class TestFlatCompositing(unittest.TestCase):
     boring: !expr tp
     flashy: !expr tp {switch:'on'}
     '''
-    ctors = {'!rel': TestFlatCompositing.RelativeStringValue}
+    ctors = {'!rel': RelativeStringValue}
     loader = yamlet.Loader(self.Opts(constructors=ctors))
     y = loader.load(YAMLET)
     self.assertEqual(y['tp']['variable'], 'defaulted value')
@@ -1143,7 +1204,7 @@ class TestFlatCompositing(unittest.TestCase):
     boring: !expr tp
     flashy: !expr tp {switch:'on'}
     '''
-    ctors = {'!rel': TestFlatCompositing.RelativeStringValue}
+    ctors = {'!rel': RelativeStringValue}
     loader = yamlet.Loader(self.Opts(constructors=ctors))
     y = loader.load(YAMLET)
     self.assertEqual(y['tp']['variable'],
@@ -1166,7 +1227,7 @@ class TestFlatCompositing(unittest.TestCase):
         variable: !rel specialized value
       variable: colliding non-compositable value
     '''
-    ctors = {'!rel': TestFlatCompositing.RelativeStringValue}
+    ctors = {'!rel': RelativeStringValue}
     loader = yamlet.Loader(self.Opts(constructors=ctors))
     with self.assertRaises(ConstructorError):
       y = loader.load(YAMLET)
@@ -1186,7 +1247,7 @@ class TestFlatCompositing(unittest.TestCase):
     boring: !expr tp
     explosive: !expr tp {switch:'on'}
     '''
-    ctors = {'!rel': TestFlatCompositing.RelativeStringValue}
+    ctors = {'!rel': RelativeStringValue}
     loader = yamlet.Loader(self.Opts(constructors=ctors))
     y = loader.load(YAMLET)
     self.assertEqual(y['tp']['variable'],
@@ -1209,7 +1270,7 @@ class TestFlatCompositing(unittest.TestCase):
     boring: !expr tp
     zesty: !expr tp {switch:'on'}
     '''
-    ctors = {'!rel': TestFlatCompositing.RelativeStringValue}
+    ctors = {'!rel': RelativeStringValue}
     loader = yamlet.Loader(self.Opts(constructors=ctors))
     y = loader.load(YAMLET)
     self.assertEqual(y['tp']['variable'], 'defaulted value')
@@ -1226,7 +1287,7 @@ class TestFlatCompositing(unittest.TestCase):
         variable: overriding value
       variable: completely clobbering value
     '''
-    ctors = {'!rel': TestFlatCompositing.RelativeStringValue}
+    ctors = {'!rel': RelativeStringValue}
     loader = yamlet.Loader(self.Opts(constructors=ctors))
     with self.assertRaises(ConstructorError):
       y = loader.load(YAMLET)
@@ -1321,6 +1382,109 @@ class TestExpressionMechanics(unittest.TestCase):
     self.assertEqual(y['foobar'], 'FooBar')
 
 
+@ParameterizedOnOpts
+class TestNameLookupMechanics(unittest.TestCase):
+  def test_xscope_up_mechanics(self):  # TODO: Check this against JSonnet
+    YAMLET = '''# Yamlet               I think "erroneous value" is incorrect
+    captured:
+      value: permanent value
+      nested:
+        test_value: !expr up.value
+    test_outer: !expr |
+        captured { value: 'overridden value' }
+    test_inner:
+      value: erroneous value
+      nested: !expr captured.nested {}
+    test_direct: !expr captured.nested
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['test_direct']['test_value'], 'permanent value')
+    self.assertEqual(y['test_outer']['nested']['test_value'], 'overridden value')
+    self.assertEqual(y['test_inner']['nested']['test_value'], 'erroneous value')
+
+  def test_local_in_up_scope(self):
+    YAMLET = '''# Yamlet
+    !local ARBITRARY_VALUES_TUPLE:
+      MY_VAR: 'Hello, world!'
+    !local CORRECT_VARIABLES_TUPLE:
+      MY_VAR: !expr ARBITRARY_VALUES_TUPLE.MY_VAR
+    variables: !expr CORRECT_VARIABLES_TUPLE
+    '''
+    loader = yamlet.Loader(self.Opts(globals={'target_platform': 'windows', 'OPTMODE': 'optimize'}))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['variables'].get('MY_VAR', 'oops!'), 'Hello, world!')
+
+
+@ParameterizedOnOpts
+class TestMergeMechanics(unittest.TestCase):
+  """
+  def test_merging_if_ladders(self):
+    YAMLET = '''# Yamlet
+    merge_one:
+      !if 1 + 1 == 2:
+        variable: Good night
+      !else:
+        phrase: !fmt '{variable}, moon!'
+    merge_two:
+      !if 1 + 1 == 4:
+        variable: What up
+      !else:
+        phrase: !fmt '{variable}, world!'
+    merged: !composite
+    - merge_one
+    - merge_two
+    - variable: Hello
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['merged']['phrase'], 'Hello, world!')
+"""
+  def test_merging_relatives_in_ifs(self):
+    YAMLET = '''# Yamlet
+    merge_one:
+      !if 1 + 1 == 2:
+        variable: !rel Hello,
+    merge_two:
+      !if 2 + 2 == 4:
+        variable: !rel world!
+    merged: !composite
+    - merge_one
+    - merge_two
+    '''
+    ctors = {'!rel': RelativeStringValue}
+    loader = yamlet.Loader(self.Opts(constructors=ctors))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['merge_one']['variable'], 'Hello,')
+    self.assertEqual(y['merge_two']['variable'], 'world!')
+    self.assertEqual(y['merged']['variable'], 'Hello, world!')
+
+  def test_merging_relatives_with_module_locals(self):
+    YAMLET = '''# Yamlet
+    other_file: !import other_file.yaml
+    merge_one:
+      !if 1 + 1 == 2:
+        variable: !rel:expr other_file.module_global_wrapper
+    merge_two:
+      !if 2 + 2 == 4:
+        variable: !rel world!
+    merged: !composite
+    - merge_one
+    - merge_two
+    '''
+    memfile = '''# Yamlet
+    module_global_wrapper: !fmt '{module_global},'
+    '''
+    loader = yamlet.Loader(self.Opts(
+        import_resolver=TempFileRetriever({
+            'other_file.yaml': TempModule(memfile, {'module_global': 'Hello'}),
+        }), globals={'module_global': 'Goodbye'}))
+    loader.add_constructor('!rel', RelativeStringValue,
+                           style=yamlet.ConstructStyle.FMT)
+    y = loader.load(YAMLET)
+    self.assertEqual(y['merged']['variable'], 'Hello, world!')
+
+
 class TempModule:
   def __init__(self, content, module_vars=None):
     if isinstance(content, TempModule):
@@ -1383,6 +1547,52 @@ class CrossModuleMechanics(unittest.TestCase):
     self.assertEqual(y['ext1_tup']['ref_dest_global'], 'Cool beans')
     self.assertEqual(y['ext1_tup']['ref_module_global'], 'msg1')
     self.assertEqual(y['ext2_tup']['ref_module_global'], 'msg2')
+
+  def test_module_globals_three_hops(self):
+    YAMLET = '''# Yamlet
+    ex_local: Goodbye
+    import1: !import file1
+    middle_local:  !fmt '{import1.ref_local}, world!'
+    middle_global: !fmt '{import1.ref_global}, moon!'
+    '''
+    memfile1 = '''# Yamlet
+    ex_local: Hello
+    import2: !import file2
+    ref_local:  !expr import2.ref_local
+    ref_global: !expr import2.ref_global
+    '''
+    memfile2 = '''# Yamlet
+    ref_local:  !expr ex_local
+    ref_global: !expr ex_global
+    '''
+    loader = yamlet.Loader(self.Opts(import_resolver=TempFileRetriever({
+        'file1': TempModule(memfile1, {'ex_global': 'Good night'}),
+        'file2': TempModule(memfile2),
+    }), globals={'ex_global': 'Smeg off'}))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['middle_local'], 'Hello, world!')
+    self.assertEqual(y['middle_global'], 'Good night, moon!')
+
+  def test_module_globals_three_hops_with_dot_lookup_in_first_hop(self):
+    YAMLET = '''# Yamlet
+    import1: !import 'memfile1'
+    value:   !fmt '{import1.variables.ref_global}'
+    '''
+    memfile1 = '''# Yamlet
+    variables: !import 'memfile2'
+    '''
+    memfile2 = '''# Yamlet
+    ref_global: !fmt '{COMPILER_ROOT}'
+    '''
+    loader = yamlet.Loader(self.Opts(
+        import_resolver=TempFileRetriever({
+            'memfile1': TempModule(memfile1, {'COMPILER_ROOT': 'GoodValue'}),
+            'memfile2': TempModule(memfile2),
+        }), globals={
+            'COMPILER_ROOT': 'BadValue',
+        }))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['value'], 'GoodValue')
 
 
 @ParameterizedOnOpts

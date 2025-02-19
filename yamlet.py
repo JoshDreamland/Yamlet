@@ -329,6 +329,13 @@ class Compositable(Cloneable):
                f'`{type(self).__name__}` does not.')
 
 
+def _ShouldFlatCompositeOnMerge(v):
+  if isinstance(v, IfLadderItem): return True
+  if isinstance(v, DeferredValueWrapper) and isinstance(v.klass, Compositable):
+    return True
+  return False
+
+
 '''▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░
  ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
 ░▒▓██▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀██▓▒░
@@ -355,12 +362,12 @@ class GclDict(dict, Compositable):
     self._yaml_point_ = yaml_point
 
   def _resolvekv(self, k, v, ectx=None):
-    bt_msg = f'Lookup of `{k}` in this scope'
-    if ectx: ectx = ectx.BranchForNameResolution(bt_msg, k, self)
     while isinstance(v, DeferredValue):
       uncaught_recursion = None
-      ectx = ectx or (
-          _EvalContext(self, self._gcl_opts_, self._yaml_point_, name=bt_msg))
+      bt_msg = f'Lookup of `{k}` in this scope'
+      if ectx: ectx = ectx.BranchForNameResolution(bt_msg, k, self)
+      else: ectx = _EvalContext(self, self._gcl_opts_, self._yaml_point_,
+                                name=bt_msg)
       v = v._gcl_resolve_(ectx)
       # XXX: This is a nice optimization but breaks accessing templates before
       # their derived types. We need to let the caching done in DeferredValue
@@ -371,6 +378,17 @@ class GclDict(dict, Compositable):
   def __getitem__(self, key):
     try:
       return self._resolvekv(key, super().__getitem__(key))
+    except ExceptionWithYamletTrace as e: exception_during_access = e
+    e = exception_during_access
+    exception_during_access = e.rewind()
+    if self._gcl_opts_.debugging.traces:
+      raise exception_during_access from e
+    else:
+      raise exception_during_access
+
+  def get(self, key, default=None):
+    try:
+      return self._resolvekv(key, super().get(key, default))
     except ExceptionWithYamletTrace as e: exception_during_access = e
     e = exception_during_access
     exception_during_access = e.rewind()
@@ -420,6 +438,15 @@ class GclDict(dict, Compositable):
           v = v.yamlet_clone(self, ectx)
           self._gcl_kv_assign_(k, v)
         assert v._gcl_parent_ is self
+      elif _ShouldFlatCompositeOnMerge(v):
+        v1 = self._gcl_locals_.get(k, _undefined)
+        if v1 is _undefined: v1 = super().setdefault(k, _undefined)
+        if v1 is not _undefined:
+          self._gcl_kv_assign_(k, FlatCompositor(
+              [v1, v.yamlet_clone(self, ectx)], ectx.GetPoint(), varname=k))
+        else:
+          v = v.yamlet_clone(self, ectx)
+          self._gcl_kv_assign_(k, v)
       elif isinstance(v, Cloneable):
         self._gcl_kv_assign_(k, v.yamlet_clone(self, ectx))
       # NOTE: These other values will not have provenance info attached from a
@@ -487,6 +514,9 @@ class GclDict(dict, Compositable):
   def _gcl_noresolve_get_(self, k): return super().__getitem__(k)
   def _gcl_traceable_get_(self, key, ectx):
     return self._resolvekv(key, super().__getitem__(key), ectx)
+  def _gcl_raw_contents_(self):
+    yield from super().items()
+    yield from self._gcl_locals_.items()
 
 
 '''▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░
@@ -943,12 +973,15 @@ class PreprocessingTuple(DeferredValue, Compositable):
   def keys(self): return self._gcl_construct_.keys()
   def _gcl_noresolve_items_(self):
     return self._gcl_construct_._gcl_noresolve_items_()
+  def _gcl_raw_contents_(self):
+    return self._gcl_construct_._gcl_raw_contents_()
   def __getattr__(self, attr):
     if attr == '_gcl_parent_': return self._gcl_construct_._gcl_parent_
     if attr == '_gcl_provenances_': return self._gcl_construct_._gcl_provenances_
     if attr == '_gcl_preprocessors_':
       return self._gcl_construct_._gcl_preprocessors_
     if attr == '_gcl_is_template_': return self._gcl_construct_._gcl_is_template_
+    if attr == '_gcl_locals_': return self._gcl_construct_._gcl_locals_
     raise AttributeError(f'PreprocessingTuple has no attribute `{attr}`')
   def __eq__(self, other): return self._gcl_construct_ == other
   def yamlet_clone(self, new_scope, ectx):
@@ -1058,32 +1091,47 @@ class YamletIfElseLadder(PreprocessingDirective):
     self.else_statement = None  # Similarly, k is !else None, v is GclDict.
     self.elif_statements = []   # Sequence of k, v pairs for each !elif.
     self.all_vars = set(v.keys())
+    self.all_locals = set(v._gcl_locals_.keys())
 
   def PutElif(self, k, v):
     self.elif_statements.append((k, v))
     self.all_vars |= v.keys()
+    self.all_locals |= v._gcl_locals_.keys()
 
   def PutElse(self, k, v):
     self.else_statement = (k, v)
     self.all_vars |= v.keys()
+    self.all_locals |= v._gcl_locals_.keys()
 
-  def Finalize(self, filtered_pairs, cErr):
+  def Finalize(self, filtered_pairs, gcl_locals, cErr):
     size = 2 + len(self.elif_statements)
-    arrays = {k: [_undefined] * size for k in self.all_vars}
+    arrays = {k: [_undefined] * size for k in (self.all_vars | self.all_locals)}
     ladder_point = self.if_statement[0]._yaml_point_
-    for k, v in self.if_statement[1]._gcl_noresolve_items_():
-      arrays[k][0] = v
+    for k, v in self.if_statement[1]._gcl_raw_contents_(): arrays[k][0] = v
     for i, elif_statement in enumerate(self.elif_statements):
-      for k, v in elif_statement[1]._gcl_noresolve_items_():
-        arrays[k][i + 1] = v
+      for k, v in elif_statement[1]._gcl_raw_contents_(): arrays[k][i + 1] = v
     if self.else_statement:
-      for k, v in self.else_statement[1]._gcl_noresolve_items_():
-        arrays[k][-1] = v
+      for k, v in self.else_statement[1]._gcl_raw_contents_(): arrays[k][-1] = v
     for k, v in arrays.items():
-      v0 = IfLadderItem((id(self), v), ladder_point)
-      v1 = filtered_pairs.setdefault(k, v0)
-      if v0 is not v1:
-        filtered_pairs[k] = FlatCompositor([v1, v0], ladder_point, varname=k)
+      v = IfLadderItem((id(self), v), ladder_point)
+      if k in self.all_locals:
+        if k in filtered_pairs: raise cErr(
+            f'`{k}` redeclared as a local in a condition; it was previously '
+            'declared normally outside of the condition')
+        dest = gcl_locals
+        v0 = dest.setdefault(k, v)
+      else:
+        dest = gcl_locals
+        v0 = gcl_locals.get(k, _undefined)
+        if v0 is _undefined:
+          dest = filtered_pairs
+          v0 = dest.setdefault(k, v)
+        elif k in filtered_pairs: raise cErr(
+            f'`{k}` has been declared both as a local and non-local, '
+            'which should have been reported or consolidated earlier. '
+            'Please file a bug, and use `!local` consistently until fixed.')
+      if v0 is not v:
+        dest[k] = FlatCompositor([v0, v], ladder_point, varname=k)
     expr_points = [self.if_statement[0]] + [e[0] for e in self.elif_statements]
     self.cond_dvals = [ExpressionToEvaluate(ep._gcl_construct_, ep._yaml_point_)
                        for ep in expr_points]
@@ -1139,7 +1187,7 @@ def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point, is_template):
   def terminateIfDirective():
     nonlocal if_directive, preprocessors
     if if_directive:
-      if_directive.Finalize(filtered_pairs, cErr)
+      if_directive.Finalize(filtered_pairs, gcl_locals, cErr)
       if_directive.AddToPreprocessorsDict(preprocessors)
       if_directive = None
   for k, v in mapping_pairs:
@@ -1189,6 +1237,7 @@ def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point, is_template):
                 preprocessors=preprocessors, gcl_is_template=is_template,
                 yaml_point=yaml_point)
   _UpdateParents(res._gcl_noresolve_values_(), res)
+  _UpdateParents(res._gcl_locals_.values(), res)
   preprocess_everything = (
       gcl_opts.debugging.preprocessing == _DebugOpts.PREPROCESS_EVERYTHING)
   if preprocessors or preprocess_everything: return PreprocessingTuple(res)
@@ -1345,6 +1394,13 @@ _BUILTIN_VARS = {
 }
 
 
+'''▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
+░▒▓██▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀██▓▒░
+░▒▓██  Name lookup magic sauce: our variable lookup and scope resolution.  ██▓▒░
+░▒▓██▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄██▓▒░
+ ░▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓'''
+
+
 def _GclNameLookup(name, ectx, top=True):
   '''Main lookup and scope resolution mechanism.'''
   if name in _BUILTIN_NAMES: return _BUILTIN_NAMES[name](ectx)
@@ -1370,17 +1426,19 @@ def _GclNameLookup(name, ectx, top=True):
         res = _GclNameLookup(name, ectx, top=False)
         if res is not _undefined: return res
     sup = sup._gcl_super_
-  if not top: return _undefined
-  # Only at the topmost scope: check module locals next.
+  # Check module locals next.
+  # This has to be done in each scope because otherwise we might miss a module
+  # global in a case where we'd have hit a top-level name in that module.
   mvars = ectx.opts.module_vars.get(ectx.ModuleFilename())
   if mvars:
     res = mvars.get(name, _undefined)
     if res is not _undefined: return res
+  if not top: return _undefined
   # We've checked everything in the current context. Go up a context.
   upctx = ectx.UpScope()
   while upctx:
     try: res = _GclNameLookup(name, upctx, top=False)
-    except Exception as e: print(e)
+    except Exception as e: print(e, file=sys.stderr)
     if res is not _undefined: return res
     upctx = upctx.UpScope()
   # All parse-wide globals from YamletOptions
@@ -1468,7 +1526,9 @@ def EvalGclAst(et, ectx):
         with ectx.Scope(val): return _BUILTIN_NAMES[et.attr](ectx)
       if isinstance(val, GclDict):
         try: return val._gcl_traceable_get_(et.attr, ectx)
-        except KeyError: ectx.Raise(KeyError, f'No {et.attr} in this scope.')
+        except KeyError:
+          ectx.Raise(KeyError,
+                     f'There is no variable called `{et.attr}` in this scope.')
       try:
         if isinstance(val, GclDict): return val[et.attr]
         else: return getattr(val, et.attr)
