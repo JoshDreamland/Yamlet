@@ -30,8 +30,9 @@ import sys
 import token
 import tokenize
 import typing
+import traceback
 
-VERSION = '0.1.1'
+VERSION = '0.1.2'
 ConstructorError = ruamel.yaml.constructor.ConstructorError
 class YamletBaseException(Exception): pass
 
@@ -187,7 +188,7 @@ class Loader(ruamel.yaml.YAML):
       return res
     self.loaded_modules[fn] = None
     with open(fn) as file:
-      try: res = self._ProcessYamlGcl(file)
+      try: res = self._ProcessYamlGcl(file, str(fn))
       except Exception as e:
         self.loaded_modules.pop(fn)
         raise
@@ -240,9 +241,12 @@ class Loader(ruamel.yaml.YAML):
     raise ruamel.yaml.constructor.ConstructorError(
         f'Yamlet `!else` got unexpected node type: {repr(node)}')
 
-  def _ProcessYamlGcl(self, ygcl):
+  def _ProcessYamlGcl(self, ygcl, module_name):
     tup = super().load(_WrapStream(ygcl))
     ectx = None
+    if isinstance(tup, (GclDict, PreprocessingTuple)):
+      tup._gcl_set_module_scope_(
+          self.yamlet_options.module_vars.setdefault(module_name, {}))
     while isinstance(tup, DeferredValue):
       if not ectx:
         ectx = _EvalContext(None, self.yamlet_options, tup._yaml_point_,
@@ -252,7 +256,8 @@ class Loader(ruamel.yaml.YAML):
 
   def load_file(self, filename):
     with open(filename) as fn: return self.load(fn)
-  def load(self, yaml_gcl): return self._ProcessYamlGcl(yaml_gcl)
+  def load(self, yaml_gcl):
+    return self._ProcessYamlGcl(yaml_gcl, '<input string>')
 
 
 class _DebugOpts:
@@ -509,6 +514,7 @@ class GclDict(dict, Compositable):
     return {k: ev(v) for k, v in self._gcl_noresolve_items_() if not excl(k, v)}
 
   def _gcl_update_parent_(self, parent): self._gcl_parent_ = parent
+  def _gcl_set_module_scope_(self, mscope): self._gcl_module_scope_ = mscope
   def _gcl_noresolve_values_(self): return super().values()
   def _gcl_noresolve_items_(self): return super().items()
   def _gcl_noresolve_get_(self, k): return super().__getitem__(k)
@@ -568,6 +574,8 @@ class YamlPoint:
     return res
   def print_warning(self, msg):
     print(f'::warning {self.as_args()}::{msg}', file=sys.stderr)
+  def __str__(self):
+    return f'<{self.start}, {self.end}>'
 
 
 class _EvalContext:
@@ -599,7 +607,6 @@ class _EvalContext:
 
   def FormatError(yaml_point, msg): return f'{yaml_point.start}\n{msg}'
   def GetPoint(self): return self._trace_point
-  def ModuleFilename(self): return self.GetPoint().filename()
   def Error(self, msg): return _EvalContext.FormatError(self.GetPoint(), msg)
 
   def NewGclDict(self, *args, gcl_parent=None, gcl_super=None, **kwargs):
@@ -970,6 +977,8 @@ class PreprocessingTuple(DeferredValue, Compositable):
     return value
   def _gcl_update_parent_(self, parent):
     self._gcl_construct_._gcl_update_parent_(parent)
+  def _gcl_set_module_scope_(self, module_scope):
+    self._gcl_construct_._gcl_set_module_scope_(module_scope)
   def keys(self): return self._gcl_construct_.keys()
   def _gcl_noresolve_items_(self):
     return self._gcl_construct_._gcl_noresolve_items_()
@@ -993,7 +1002,7 @@ class PreprocessingTuple(DeferredValue, Compositable):
 
 def _UpdateParents(items, parent):
   for i in items:
-    if isinstance(i, (GclDict, DeferredValue)):
+    if isinstance(i, (GclDict, DeferredValue, PreprocessingDirective)):
       i._gcl_update_parent_(parent)
 
 
@@ -1146,6 +1155,10 @@ class YamletIfElseLadder(PreprocessingDirective):
       preprocessors |= self.else_statement[1]._gcl_preprocessors_
 
   def _gcl_preprocess_(self, ectx): pass
+  def _gcl_update_parent_(self, parent):
+    self.if_statement[1]._gcl_update_parent_(parent)
+    for e in self.elif_statements: e[1]._gcl_update_parent_(parent)
+    if self.else_statement: self.else_statement[1]._gcl_update_parent_(parent)
 
   def yamlet_clone(self, new_scope, ectx):
     return YamletIfElseLadder(
@@ -1238,6 +1251,7 @@ def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point, is_template):
                 yaml_point=yaml_point)
   _UpdateParents(res._gcl_noresolve_values_(), res)
   _UpdateParents(res._gcl_locals_.values(), res)
+  _UpdateParents(preprocessors.values(), res)
   preprocess_everything = (
       gcl_opts.debugging.preprocessing == _DebugOpts.PREPROCESS_EVERYTHING)
   if preprocessors or preprocess_everything: return PreprocessingTuple(res)
@@ -1419,6 +1433,9 @@ def _GclNameLookup(name, ectx, top=True):
     with ectx.Scope(ectx.scope._gcl_parent_):
       res = _GclNameLookup(name, ectx, top=False)
       if res is not _undefined: return res
+  else:
+    res = ectx.scope._gcl_module_scope_.get(name, _undefined)
+    if res is not _undefined: return res
   sup = ectx.scope._gcl_super_
   while sup is not None:
     if sup._gcl_parent_:
@@ -1426,13 +1443,6 @@ def _GclNameLookup(name, ectx, top=True):
         res = _GclNameLookup(name, ectx, top=False)
         if res is not _undefined: return res
     sup = sup._gcl_super_
-  # Check module locals next.
-  # This has to be done in each scope because otherwise we might miss a module
-  # global in a case where we'd have hit a top-level name in that module.
-  mvars = ectx.opts.module_vars.get(ectx.ModuleFilename())
-  if mvars:
-    res = mvars.get(name, _undefined)
-    if res is not _undefined: return res
   if not top: return _undefined
   # We've checked everything in the current context. Go up a context.
   upctx = ectx.UpScope()
@@ -1525,7 +1535,8 @@ def EvalGclAst(et, ectx):
       if et.attr in _BUILTIN_NAMES:
         with ectx.Scope(val): return _BUILTIN_NAMES[et.attr](ectx)
       if isinstance(val, GclDict):
-        try: return val._gcl_traceable_get_(et.attr, ectx)
+        try:
+          with ectx.Scope(val): return val._gcl_traceable_get_(et.attr, ectx)
         except KeyError:
           ectx.Raise(KeyError,
                      f'There is no variable called `{et.attr}` in this scope.')
@@ -1535,6 +1546,7 @@ def EvalGclAst(et, ectx):
       except Exception as e:
         ectx.Raise(KeyError, f'Cannot access attribute on value:\n  value'
              f'({type(val).__name__}): {val}\n  attribute: {et.attr}\n', e)
+
     case ast.BinOp:
       l, r = ev(et.left), ev(et.right)
       match type(et.op):

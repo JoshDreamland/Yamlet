@@ -1573,26 +1573,48 @@ class CrossModuleMechanics(unittest.TestCase):
     self.assertEqual(y['middle_local'], 'Hello, world!')
     self.assertEqual(y['middle_global'], 'Good night, moon!')
 
+  def test_module_globals_three_hops_with_composition_in_the_middle(self):
+    YAMLET = '''# Yamlet
+    import1: !import 'memfile1'
+    value:   !fmt '{import1.variables.ref_global}'
+    '''
+    memfile1 = '''# Yamlet
+    variables: !composite
+    - !import 'memfile2'
+    '''
+    memfile2 = '''# Yamlet
+    ref_global: !fmt '{ex_global}'
+    '''
+    loader = yamlet.Loader(self.Opts(
+        import_resolver=TempFileRetriever({
+            'memfile1': TempModule(memfile1, {'ex_global': 'GoodValue'}),
+            'memfile2': TempModule(memfile2),
+        }), globals={
+            'ex_global': 'BadValue',
+        }))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['value'], 'GoodValue')
+
   def test_module_globals_three_hops_with_dot_lookup_in_first_hop(self):
     YAMLET = '''# Yamlet
     import1: !import 'memfile1'
     value:   !fmt '{import1.variables.ref_global}'
     '''
     memfile1 = '''# Yamlet
-    variables: !import 'memfile2'
+    variables: !import 'memfile2'  # Direct ref.
     '''
     memfile2 = '''# Yamlet
     ref_global: !fmt '{COMPILER_ROOT}'
     '''
     loader = yamlet.Loader(self.Opts(
         import_resolver=TempFileRetriever({
-            'memfile1': TempModule(memfile1, {'COMPILER_ROOT': 'GoodValue'}),
+            'memfile1': TempModule(memfile1, {'COMPILER_ROOT': 'Middle value'}),
             'memfile2': TempModule(memfile2),
         }), globals={
-            'COMPILER_ROOT': 'BadValue',
+            'COMPILER_ROOT': 'Last-ditch value',
         }))
     y = loader.load(YAMLET)
-    self.assertEqual(y['value'], 'GoodValue')
+    self.assertEqual(y['value'], 'Last-ditch value')
 
 
 @ParameterizedOnOpts
