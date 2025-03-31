@@ -1056,6 +1056,23 @@ class TestConditionals(unittest.TestCase):
     y = loader.load(YAMLET)
     self.assertEqual(y.get('v', 'oops!'), 'Hello, world!')
 
+  def test_local_in_composite(self):
+    YAMLET = '''# Yamlet
+    t: !composite
+      - !local l1: hello
+        x: !fmt '{l1}, '
+      - !local l2: world
+        y: !fmt '{l2}!'
+    v: !fmt '{t.x}{t.y}'
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['v'], 'hello, world!')
+    self.assertEqual(y.evaluate_fully(), {
+      't': { 'x': 'hello, ', 'y': 'world!' },
+      'v': 'hello, world!'
+    })
+
 
 @ParameterizedForStress
 class TestStress(unittest.TestCase):

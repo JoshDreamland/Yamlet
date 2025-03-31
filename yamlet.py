@@ -244,14 +244,17 @@ class Loader(ruamel.yaml.YAML):
   def _ProcessYamlGcl(self, ygcl, module_name):
     tup = super().load(_WrapStream(ygcl))
     ectx = None
-    if isinstance(tup, (GclDict, PreprocessingTuple)):
-      tup._gcl_set_module_scope_(
-          self.yamlet_options.module_vars.setdefault(module_name, {}))
     while isinstance(tup, DeferredValue):
+      if isinstance(tup, (GclDict, PreprocessingTuple)):
+        tup._gcl_set_module_scope_(
+            self.yamlet_options.module_vars.setdefault(module_name, {}))
       if not ectx:
         ectx = _EvalContext(None, self.yamlet_options, tup._yaml_point_,
                             'Evaluating preprocessors in Yamlet document.')
       tup = tup._gcl_resolve_(ectx)
+    if isinstance(tup, (GclDict, PreprocessingTuple)):
+      tup._gcl_set_module_scope_(
+          self.yamlet_options.module_vars.setdefault(module_name, {}))
     return tup
 
   def load_file(self, filename):
@@ -424,12 +427,19 @@ class GclDict(dict, Compositable):
     return f'`{k}` was declared directly in this tuple {_TuplePointStr(self)}'
 
   def yamlet_merge(self, other, ectx):
+    """This is the primary tuple merge logic in Yamlet."""
     ectx.Assert(isinstance(other, Compositable),
                 'Expected Compositable to merge.', ex_class=TypeError)
     ectx.Assert(isinstance(other, GclDict) or
                 isinstance(other, PreprocessingTuple),
                 'Expected dict-like type to composite.', ex_class=TypeError)
-    for k, v in other._gcl_noresolve_items_():
+    put_item = self._gcl_kv_assign_
+    def mergeable_items():
+      nonlocal put_item
+      yield from other._gcl_noresolve_items_()
+      put_item = self._gcl_locals_.setdefault
+      yield from other._gcl_locals_.items()
+    for k, v in mergeable_items():
       if isinstance(v, Compositable):
         v1 = self._gcl_locals_.get(k, _undefined)
         if v1 is _undefined: v1 = super().setdefault(k, _undefined)
@@ -441,24 +451,24 @@ class GclDict(dict, Compositable):
           v = v1
         else:
           v = v.yamlet_clone(self, ectx)
-          self._gcl_kv_assign_(k, v)
+          put_item(k, v)
         assert v._gcl_parent_ is self
       elif _ShouldFlatCompositeOnMerge(v):
         v1 = self._gcl_locals_.get(k, _undefined)
         if v1 is _undefined: v1 = super().setdefault(k, _undefined)
         if v1 is not _undefined:
-          self._gcl_kv_assign_(k, FlatCompositor(
+          put_item(k, FlatCompositor(
               [v1, v.yamlet_clone(self, ectx)], ectx.GetPoint(), varname=k))
         else:
           v = v.yamlet_clone(self, ectx)
-          self._gcl_kv_assign_(k, v)
+          put_item(k, v)
       elif isinstance(v, Cloneable):
-        self._gcl_kv_assign_(k, v.yamlet_clone(self, ectx))
+        put_item(k, v.yamlet_clone(self, ectx))
       # NOTE: These other values will not have provenance info attached from a
       # merge or clone operation, as the assignments above do.
       elif v or (v not in (null, external, _undefined)):
         self._gcl_provenances_[k] = other._gcl_provenances_.get(k, other)
-        self._gcl_kv_assign_(k, v)
+        put_item(k, v)
       elif v is null:
         self._gcl_provenances_[k] = other._gcl_provenances_.get(k, other)
         super().pop(k, None)
@@ -1434,6 +1444,7 @@ def _GclNameLookup(name, ectx, top=True):
       res = _GclNameLookup(name, ectx, top=False)
       if res is not _undefined: return res
   else:
+    assert hasattr(ectx.scope, '_gcl_module_scope_'), f'{ectx.scope._yaml_point_}'
     res = ectx.scope._gcl_module_scope_.get(name, _undefined)
     if res is not _undefined: return res
   sup = ectx.scope._gcl_super_
