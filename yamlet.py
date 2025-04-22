@@ -32,7 +32,7 @@ import tokenize
 import typing
 import traceback
 
-VERSION = '0.1.2'
+VERSION = '0.2.0'
 ConstructorError = ruamel.yaml.constructor.ConstructorError
 class YamletBaseException(Exception): pass
 
