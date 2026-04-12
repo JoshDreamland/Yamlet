@@ -2188,5 +2188,79 @@ class TestCustomConstructors(unittest.TestCase):
     self.assertEqual(t['case4'].value, 3)
 
 
+@ParameterizedOnOpts
+class TestExternalSentinel(unittest.TestCase):
+  '''Tests that yamlet_merge correctly handles a Compositable value filling
+  a key declared !external in the base tuple.
+
+  Bug: yamlet_merge checked only `v1 is not _undefined` before entering the
+  compositing branch.  Because `external` is a distinct singleton (not
+  _undefined), the check was True, and the code fell into the composite path
+  where it found `external` is not Compositable and raised TypeError.
+
+  The fix treats `v1 is external` the same as `v1 is _undefined` for the
+  purpose of the compositing branch: the extending tuple is *providing* the
+  value, not compositing with an existing one.
+  '''
+
+  # ------------------------------------------------------------------
+  # GclDict filling an !external key (no YamletList dependency).
+  # Would raise TypeError("Cannot composite `external` object") before fix.
+  # ------------------------------------------------------------------
+  def test_dict_fills_external_key(self):
+    YAMLET = '''# Yamlet
+base: !template
+  data: !external
+
+derived: !composite
+  - base
+  - data:
+      key: value
+'''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['derived']['data']['key'], 'value')
+
+  # ------------------------------------------------------------------
+  # Derived tuple providing a nested template for an !external key.
+  # ------------------------------------------------------------------
+  def test_template_fills_external_key(self):
+    YAMLET = '''# Yamlet
+inner: !template
+  x: from_inner
+
+base: !template
+  data: !external
+
+derived: !composite
+  - base
+  - data: !composite
+      - inner
+'''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['derived']['data']['x'], 'from_inner')
+
+  # ------------------------------------------------------------------
+  # Confirm external still raises at *access* time if never filled.
+  # The fix must not suppress the intended error for genuinely missing keys.
+  # ------------------------------------------------------------------
+  def test_unfilled_external_still_raises(self):
+    # external only raises through name-lookup (expression context),
+    # not via direct __getitem__.  Use a !expr that references the key.
+    YAMLET = '''# Yamlet
+base: !template
+  data: !external
+  result: !expr data
+
+derived: !composite
+  - base
+'''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    with self.assertRaises(Exception):
+      _ = t['derived']['result']
+
+
 if __name__ == '__main__':
   unittest.main()

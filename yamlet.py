@@ -443,15 +443,18 @@ class GclDict(dict, Compositable):
       if isinstance(v, Compositable):
         v1 = self._gcl_locals_.get(k, _undefined)
         if v1 is _undefined: v1 = super().setdefault(k, _undefined)
-        if v1 is not _undefined:
+        if v1 is _undefined or v1 is external:
+          # Extending tuple is providing a value for a key that either does
+          # not exist yet (_undefined) or was declared as a required input
+          # (external). In both cases the extending tuple owns the value.
+          v = v.yamlet_clone(self, ectx)
+          put_item(k, v)
+        else:
           if not isinstance(v1, Compositable):
             ectx.Raise(TypeError, f'Cannot composite `{type(v1)}` object `{k}` '
                                    'with dictionary value in extending tuple.')
           v1.yamlet_merge(v, ectx)
           v = v1
-        else:
-          v = v.yamlet_clone(self, ectx)
-          put_item(k, v)
         assert v._gcl_parent_ is self
       elif _ShouldFlatCompositeOnMerge(v):
         v1 = self._gcl_locals_.get(k, _undefined)
