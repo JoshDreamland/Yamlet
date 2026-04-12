@@ -108,6 +108,55 @@ class Loader(ruamel.yaml.YAML):
         return tp(loader.construct_scalar(node),
                   YamlPoint(node.start_mark, node.end_mark))
       return Constructor
+    def ConstructScalarOrList(tp):
+      """Like ConstructScalar, but also accepts a sequence node.
+
+      When applied to a YAML sequence, each item must be a scalar and is
+      individually wrapped in `tp` (e.g. ExpressionToEvaluate).  This lets
+      you write::
+
+          items: !expr
+            - prefix + '_a'
+            - prefix + '_b'
+
+      instead of tagging every element individually.
+
+      Flow-sequence gotcha
+      --------------------
+      Because YAML interprets ``[...]`` as a flow-sequence node, the tag is
+      applied to the *sequence* rather than to a single scalar string.  This
+      means ``!expr [a, b, c]`` produces a YamletList that evaluates each of
+      ``a``, ``b``, ``c`` as independent Python expressions (variable lookups).
+      Notably, YAML strips quoting before we see the scalar, so
+      ``!expr ["a", "b", "c"]`` also resolves *a*, *b*, *c* as names, not as
+      string literals — which is surprising.
+
+      If the YAML literal-style proposal ever lands (letting tags imply scalar
+      parse style), ``!expr [...]`` would always be treated as a raw scalar
+      string and evaluated as a single Python expression.  At that point
+      ``!expr ["a", "b", "c"]`` would correctly yield ``['a', 'b', 'c']``.
+      Unquoted ``!expr [a, b, c]`` would still yield variable lookups, so
+      that common case is forward-compatible.
+
+      In the meantime, use ``list(expr for x in seq)`` or ``!expr |`` literal
+      style for list comprehensions / Python list literals inside ``!expr``.
+      """
+      def Constructor(loader, node):
+        if isinstance(node, ruamel.yaml.SequenceNode):
+          items = []
+          for child in node.value:
+            if not isinstance(child, ruamel.yaml.ScalarNode):
+              raise ConstructorError(None, None,
+                  f'`!expr` list items must be scalar expressions; '
+                  f'got {type(child).__name__}',
+                  child.start_mark)
+            items.append(tp(loader.construct_scalar(child),
+                            YamlPoint(child.start_mark, child.end_mark)))
+          return YamletList(items, gcl_opts=self.yamlet_options,
+                            yaml_point=YamlPoint(node.start_mark, node.end_mark))
+        return tp(loader.construct_scalar(node),
+                  YamlPoint(node.start_mark, node.end_mark))
+      return Constructor
     def ConstructConstant(tag, val):
       def Constructor(loader, node):
         n = loader.construct_scalar(node)
@@ -121,10 +170,12 @@ class Loader(ruamel.yaml.YAML):
     yc.add_constructor(None, UndefinedConstructor)  # Raise on undefined tags
     yc.add_constructor(ruamel.yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
                        self.ConstructGclDict)
+    yc.add_constructor(ruamel.yaml.resolver.BaseResolver.DEFAULT_SEQUENCE_TAG,
+                       self.ConstructYamletList)
     yc.add_constructor("!import",    GclImport)
     yc.add_constructor("!composite", self.DeferGclComposite)
     yc.add_constructor("!fmt",       ConstructScalar(StringToSubstitute))
-    yc.add_constructor("!expr",      ConstructScalar(ExpressionToEvaluate))
+    yc.add_constructor("!expr",      ConstructScalarOrList(ExpressionToEvaluate))
     yc.add_constructor("!lambda",    ConstructScalar(GclLambda))
     yc.add_constructor("!local",     ConstructScalar(GclLocalKey))
     yc.add_constructor("!template",  self.ConstructGclTemplate)
@@ -194,6 +245,11 @@ class Loader(ruamel.yaml.YAML):
         raise
     self.loaded_modules[fn] = res
     return res
+
+  def ConstructYamletList(self, loader, node):
+    items = loader.construct_sequence(node, deep=True)
+    return YamletList(items, gcl_opts=self.yamlet_options,
+                      yaml_point=YamlPoint(node.start_mark, node.end_mark))
 
   def ConstructGclDict(self, loader, node):
     try:
@@ -353,6 +409,99 @@ def _ShouldFlatCompositeOnMerge(v):
   ░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒'''
 
 
+class YamletList(list, Compositable):
+  '''A YAML sequence that lazily resolves DeferredValue items through its scope.
+
+  Analogous to GclDict for mappings: all YAML sequences are constructed as
+  YamletList so that items tagged with !expr, !fmt, etc. are resolved in the
+  correct scope when accessed rather than when the document is parsed.
+
+  _gcl_parent_ is the containing GclDict and serves as the name-resolution
+  scope.  It is set either by yamlet_clone (for composited tuples) or by
+  _UpdateParents at GclDict construction time (for top-level non-template
+  dicts that are never cloned).  Accessing a YamletList with _gcl_parent_
+  still None is a bug and raises AssertionError.
+
+  Composition semantics for lists are undefined; yamlet_merge raises
+  TypeError.  When a derived tuple introduces a list for a key that has no
+  existing value in the base, the list is simply cloned via yamlet_clone.
+
+  Interface gap (tracked)
+  -----------------------
+  GclDict and YamletList are both scope-bound container types, but there is
+  no shared protocol that codifies this.  As a result, evaluate_fully and
+  _UpdateParents contain explicit isinstance checks for both types.  Any
+  future Yamlet or Speare container type (e.g. a typed list, a state
+  reference) will need to be added to each check site manually.
+
+  The correct fix is a lightweight EvaluableContainer protocol with two
+  obligations: (1) _gcl_update_parent_(parent) -- called at construction to
+  wire the scope, and (2) a recursive evaluation hook invoked by
+  evaluate_fully.  Until that protocol exists, treat the explicit checks as
+  load-bearing and do not remove them without a replacement.
+  '''
+
+  def __init__(self, items, gcl_opts, yaml_point):
+    super().__init__(items)
+    self._gcl_opts_ = gcl_opts
+    self._yaml_point_ = yaml_point
+    self._gcl_parent_ = None  # set in yamlet_clone or _UpdateParents at construction
+
+  def yamlet_clone(self, new_scope, ectx):
+    cloned = []
+    for item in list.__iter__(self):
+      cloned.append(
+          item.yamlet_clone(new_scope, ectx) if isinstance(item, Cloneable) else item)
+    result = YamletList(cloned, self._gcl_opts_, self._yaml_point_)
+    result._gcl_parent_ = new_scope
+    return result
+
+  def yamlet_merge(self, other, ectx):
+    ectx.Raise(TypeError,
+               f'Cannot composite list values: key was defined as a list in '
+               f'both the base tuple and the extending tuple.')
+
+  def _resolve_item(self, i, v):
+    if not isinstance(v, DeferredValue): return v
+    if self._gcl_parent_ is None: return v
+    ectx = _EvalContext(self._gcl_parent_, self._gcl_opts_, self._yaml_point_,
+                        name=f'List index [{i}]')
+    while isinstance(v, DeferredValue):
+      v = v._gcl_resolve_(ectx)
+    return v
+
+  def __getitem__(self, key):
+    v = super().__getitem__(key)
+    if isinstance(key, slice):
+      return [self._resolve_item(i, item)
+              for i, item in enumerate(list.__iter__(v))]
+    return self._resolve_item(key, v)
+
+  def __iter__(self):
+    for i, v in enumerate(list.__iter__(self)):
+      yield self._resolve_item(i, v)
+
+  def __eq__(self, other):
+    if not isinstance(other, list): return NotImplemented
+    if len(self) != len(other): return False
+    return all(a == b for a, b in zip(self, other))
+
+  def __ne__(self, other):
+    result = self.__eq__(other)
+    return result if result is NotImplemented else not result
+
+  def __add__(self, other):
+    return list(self) + list(other)
+
+  def __radd__(self, other):
+    return list(other) + list(self)
+
+  def _gcl_update_parent_(self, parent): self._gcl_parent_ = parent
+
+  def __repr__(self):
+    return f'YamletList({list.__repr__(self)})'
+
+
 class GclDict(dict, Compositable):
   def __init__(self, *args, gcl_locals,
                gcl_parent, gcl_super, gcl_opts, yaml_point, preprocessors,
@@ -381,6 +530,11 @@ class GclDict(dict, Compositable):
       # their derived types. We need to let the caching done in DeferredValue
       # handle it for that case.
       # self.__setitem__(k, r)
+    if isinstance(v, YamletList) and v._gcl_parent_ is None:
+      raise AssertionError(
+          f'YamletList accessed with no scope: {v!r}. '
+          f'This indicates a construction site that does not call _UpdateParents. '
+          f'Workaround: replace this raise with v._gcl_parent_ = self.')
     return v
 
   def __getitem__(self, key):
@@ -520,7 +674,10 @@ class GclDict(dict, Compositable):
                                   name='Fully evaluating Yamlet tuple'))
     def ev(v):
       while isinstance(v, DeferredValue): v = v._gcl_resolve_(ectx)
+      # See "Interface gap" note in YamletList docstring: these two checks
+      # must be kept in sync with any new scope-bound container types.
       if isinstance(v, GclDict): v = v.evaluate_fully(ectx)
+      elif isinstance(v, YamletList): v = [ev(i) for i in v]
       return v
     def excl(k, v):
       return isinstance(v, (GclDict, PreprocessingTuple)) and v._gcl_is_template_
@@ -1014,8 +1171,10 @@ class PreprocessingTuple(DeferredValue, Compositable):
 
 
 def _UpdateParents(items, parent):
+  # See "Interface gap" note in YamletList docstring: any new scope-bound
+  # container type must be added to this tuple.
   for i in items:
-    if isinstance(i, (GclDict, DeferredValue, PreprocessingDirective)):
+    if isinstance(i, (GclDict, DeferredValue, PreprocessingDirective, YamletList)):
       i._gcl_update_parent_(parent)
 
 
@@ -1658,7 +1817,11 @@ def EvalGclAst(et, ectx):
       return v[ev(et.slice)]
 
     case ast.List:
-      return [ev(x) for x in et.elts]
+      result = YamletList([ev(x) for x in et.elts],
+                          gcl_opts=ectx.opts,
+                          yaml_point=ectx.GetPoint())
+      result._gcl_parent_ = ectx.scope
+      return result
 
     case ast.Tuple:
       return tuple(ev(x) for x in et.elts)

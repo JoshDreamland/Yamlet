@@ -2262,5 +2262,413 @@ derived: !composite
       _ = t['derived']['result']
 
 
+@ParameterizedOnOpts
+class TestListCompositing(unittest.TestCase):
+  def test_list_items_evaluate_in_own_scope(self):
+    # Regression: a list containing !expr items should evaluate each item in
+    # the scope of the tuple that contains the list, not in whichever scope
+    # first cached the DeferredValue.  If the same DeferredValue instance is
+    # shared across two composed tuples, the second tuple would silently return
+    # the first tuple's cached result.
+    YAMLET = '''# Yamlet
+    base: !template
+      items:
+        - !expr modifier + '_item'
+        - !fmt 'prefix_{modifier}'
+    derived1: !composite
+      - base
+      - modifier: hello
+    derived2: !composite
+      - base
+      - modifier: world
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    # Access derived2 first to make caching order irrelevant
+    self.assertEqual(t['derived2']['items'][0], 'world_item')
+    self.assertEqual(t['derived2']['items'][1], 'prefix_world')
+    self.assertEqual(t['derived1']['items'][0], 'hello_item')
+    self.assertEqual(t['derived1']['items'][1], 'prefix_hello')
+
+  def test_list_items_evaluate_in_own_scope_reverse_access_order(self):
+    # Same as above but access derived1 first, ensuring the test is not
+    # sensitive to which tuple happens to populate the cache first.
+    YAMLET = '''# Yamlet
+    base: !template
+      items:
+        - !expr modifier + '_item'
+        - !fmt 'prefix_{modifier}'
+    derived1: !composite
+      - base
+      - modifier: hello
+    derived2: !composite
+      - base
+      - modifier: world
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['derived1']['items'][0], 'hello_item')
+    self.assertEqual(t['derived1']['items'][1], 'prefix_hello')
+    self.assertEqual(t['derived2']['items'][0], 'world_item')
+    self.assertEqual(t['derived2']['items'][1], 'prefix_world')
+
+
+@ParameterizedOnOpts
+class TestExprList(unittest.TestCase):
+  def test_expr_on_sequence_block(self):
+    # !expr on a block sequence: each item is a Yamlet expression.
+    # This is syntactic sugar for tagging every element individually.
+    YAMLET = '''# Yamlet
+    base: !template
+      prefix: default
+      items: !expr
+        - prefix + '_a'
+        - prefix + '_b'
+    derived1: !composite
+      - base
+      - prefix: foo
+    derived2: !composite
+      - base
+      - prefix: bar
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['derived1']['items'], ['foo_a', 'foo_b'])
+    self.assertEqual(t['derived2']['items'], ['bar_a', 'bar_b'])
+    # Also verify per-element access
+    self.assertEqual(t['derived1']['items'][0], 'foo_a')
+    self.assertEqual(t['derived2']['items'][1], 'bar_b')
+
+  def test_expr_on_sequence_flow(self):
+    # Same with flow sequence syntax: !expr [expr1, expr2]
+    YAMLET = '''# Yamlet
+    prefix: hello
+    items: !expr [prefix + '_x', prefix + '_y']
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['items'], ['hello_x', 'hello_y'])
+
+  def test_expr_list_in_expression(self):
+    # An !expr list can be consumed by an expression (e.g. len, indexing).
+    YAMLET = '''# Yamlet
+    vals: !expr
+      - 100
+      - 200
+      - 300
+    count: !expr len(vals)
+    first: !expr vals[0]
+    last:  !expr vals[-1]
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['count'], 3)
+    self.assertEqual(t['first'], 100)
+    self.assertEqual(t['last'], 300)
+
+
+@ParameterizedOnOpts
+class TestYamletList(unittest.TestCase):
+  """Covers YamletList semantics: resolution, equality, expressions, edge cases."""
+
+  # ------------------------------------------------------------------
+  # 1. Whole-list equality for a plain list with individually-tagged items
+  #    (user's specific ask — tests __eq__ on the non-!expr path)
+  # ------------------------------------------------------------------
+  def test_whole_list_equality_plain_list_with_expr_items(self):
+    YAMLET = '''# Yamlet
+    base: !template
+      modifier: default
+      items:
+        - !expr modifier + '_a'
+        - !fmt '{modifier}_b'
+        - literal_c
+    derived1: !composite
+      - base
+      - modifier: foo
+    derived2: !composite
+      - base
+      - modifier: bar
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['derived2']['items'], ['bar_a', 'bar_b', 'literal_c'])
+    self.assertEqual(t['derived1']['items'], ['foo_a', 'foo_b', 'literal_c'])
+
+  # ------------------------------------------------------------------
+  # 2. List referenced by name in a !expr expression
+  # ------------------------------------------------------------------
+  def test_list_referenced_in_expr(self):
+    YAMLET = '''# Yamlet
+    base: !template
+      prefix: default
+      words:
+        - !expr prefix + '_x'
+        - !expr prefix + '_y'
+      first:  !expr words[0]
+      count:  !expr len(words)
+    derived: !composite
+      - base
+      - prefix: hello
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['derived']['first'], 'hello_x')
+    self.assertEqual(t['derived']['count'], 2)
+
+  # ------------------------------------------------------------------
+  # 3. List comprehension over a YamletList in an expression
+  # ------------------------------------------------------------------
+  def test_list_comprehension_over_yamlet_list(self):
+    # Note: `!expr [expr for x in seq]` does NOT work — YAML treats the
+    # `[...]` as a flow-sequence node and feeds individual items to
+    # ConstructScalarOrList.  Use `list(expr for x in seq)` instead, which
+    # has no YAML-special characters and evaluates as intended.
+    YAMLET = '''# Yamlet
+    base: !template
+      tag: default
+      words:
+        - !expr tag + '_one'
+        - !expr tag + '_two'
+      shouted: !expr list(w.upper() for w in words)
+    derived: !composite
+      - base
+      - tag: hi
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['derived']['shouted'], ['HI_ONE', 'HI_TWO'])
+
+  # ------------------------------------------------------------------
+  # 4. Slice access
+  # ------------------------------------------------------------------
+  def test_slice_access(self):
+    YAMLET = '''# Yamlet
+    base: !template
+      prefix: x
+      items:
+        - !expr prefix + '_0'
+        - !expr prefix + '_1'
+        - !expr prefix + '_2'
+    derived: !composite
+      - base
+      - prefix: p
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['derived']['items'][1:], ['p_1', 'p_2'])
+    self.assertEqual(t['derived']['items'][:2], ['p_0', 'p_1'])
+
+  # ------------------------------------------------------------------
+  # 5. Mixed tagged and literal items
+  # ------------------------------------------------------------------
+  def test_mixed_tagged_and_literal_items(self):
+    YAMLET = '''# Yamlet
+    base: !template
+      label: default
+      items:
+        - static_value
+        - !expr label + '_dynamic'
+        - 42
+        - !fmt 'fmt_{label}'
+    derived: !composite
+      - base
+      - label: test
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['derived']['items'],
+                     ['static_value', 'test_dynamic', 42, 'fmt_test'])
+
+  # ------------------------------------------------------------------
+  # 6. Literal-only list — YamletList should be transparent
+  # ------------------------------------------------------------------
+  def test_literal_only_list(self):
+    YAMLET = '''# Yamlet
+    items:
+      - alpha
+      - beta
+      - gamma
+    count: !expr len(items)
+    second: !expr items[1]
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['items'], ['alpha', 'beta', 'gamma'])
+    self.assertEqual(t['count'], 3)
+    self.assertEqual(t['second'], 'beta')
+
+  # ------------------------------------------------------------------
+  # 7. List-on-list composition raises TypeError
+  # ------------------------------------------------------------------
+  def test_list_merge_raises(self):
+    YAMLET = '''# Yamlet
+    base: !template
+      items:
+        - a
+    derived: !composite
+      - base
+      - items:
+        - b
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    with self.assertRaises(Exception):
+      _ = t['derived']['items']
+
+  # ------------------------------------------------------------------
+  # 8. !external key filled by a list from an extending tuple
+  #    (regression for the external-as-undefined fix in yamlet_merge)
+  # ------------------------------------------------------------------
+  def test_external_key_filled_by_list(self):
+    YAMLET = '''# Yamlet
+    lib: !template
+      names: !external
+    libv2: !composite
+      - lib
+      - names:
+        - alpha
+        - beta
+        - gamma
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['libv2']['names'], ['alpha', 'beta', 'gamma'])
+
+  # ------------------------------------------------------------------
+  # 9. Nested list — inner YamletList picks up the enclosing scope
+  # ------------------------------------------------------------------
+  def test_nested_list_scope(self):
+    YAMLET = '''# Yamlet
+    base: !template
+      tag: default
+      matrix:
+        -
+          - !expr tag + '_00'
+          - !expr tag + '_01'
+        -
+          - !expr tag + '_10'
+          - !expr tag + '_11'
+    derived: !composite
+      - base
+      - tag: v
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    m = t['derived']['matrix']
+    self.assertEqual(m[0], ['v_00', 'v_01'])
+    self.assertEqual(m[1], ['v_10', 'v_11'])
+    self.assertEqual(m[0][1], 'v_01')
+
+
+class TestYamletListEdgeCases(unittest.TestCase):
+  '''Targeted edge-case tests written to probe gaps in the YamletList model.
+
+  The primary hypothesis under test: list.__add__ (called by `+` in an
+  expression) accesses CPython's internal C array directly, bypassing
+  YamletList.__iter__.  That means `yamlet_list + [something]` in a !expr
+  expression produces a plain Python list whose YamletList-origin slots still
+  contain raw DeferredValue objects -- never resolved.
+
+  If that is true, test_concatenation_loses_resolution should FAIL with the
+  current implementation, demonstrating the gap.
+  '''
+
+  def Opts(self):
+    return yamlet.YamletOptions()
+
+  # ------------------------------------------------------------------
+  # Baseline: subscript on a YamletList inside !expr works correctly.
+  # ------------------------------------------------------------------
+  def test_subscript_via_expr_works(self):
+    YAMLET = '''# Yamlet
+prefix: hello
+items:
+  - !expr prefix + '_a'
+  - !expr prefix + '_b'
+first: !expr items[0]
+'''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['first'], 'hello_a')
+
+  # ------------------------------------------------------------------
+  # Gap test: concatenation via + in a !expr expression.
+  # list.__add__ bypasses YamletList.__iter__, so items from the
+  # YamletList side of the concatenation may come back unresolved.
+  # This test is expected to FAIL if the gap exists.
+  # ------------------------------------------------------------------
+  def test_concatenation_loses_resolution(self):
+    YAMLET = '''# Yamlet
+prefix: hello
+items:
+  - !expr prefix + '_a'
+extra: !expr items + ['world']
+'''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    # If list.__add__ bypasses __iter__, extra[0] will be a raw
+    # ExpressionToEvaluate rather than the string 'hello_a'.
+    self.assertEqual(t['extra'][0], 'hello_a')
+    self.assertEqual(t['extra'][1], 'world')
+
+  # ------------------------------------------------------------------
+  # Gap test: ast.List in EvalGclAst returns a plain Python list.
+  #
+  # IMPORTANT: `!expr [a, b]` is a YAML flow-sequence, parsed by
+  # ConstructScalarOrList at load time -- it never reaches ast.List.
+  # ast.List fires only for list literals INSIDE a scalar !expr string:
+  #   !expr "[a, b]"         (double-quoted scalar)
+  #   !expr "items + [x]"   (list literal embedded in a larger expression)
+  # The `+ ['world']` in test_concatenation_loses_resolution is the
+  # latter case.
+  #
+  # For consistency with YAML-sequence YamletLists, ast.List should
+  # return a YamletList so Cloneable/evaluate_fully mechanics apply.
+  # This test is expected to FAIL until ast.List is fixed.
+  # ------------------------------------------------------------------
+  def test_expr_scalar_list_literal_is_yamletlist(self):
+    # Double-quoted scalar so YAML sees it as a string; !expr then
+    # parses it as Python, triggering ast.List inside EvalGclAst.
+    YAMLET = '''# Yamlet
+x: hello
+result: !expr "[x + '_a', x + '_b']"
+'''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    # Values should be correct regardless of type.
+    self.assertEqual(list(t['result']), ['hello_a', 'hello_b'])
+    # Type should be YamletList, not plain list.
+    self.assertIsInstance(t['result'], yamlet.YamletList)
+
+  # ------------------------------------------------------------------
+  # Gap test: evaluate_fully does not recurse into a plain-list result
+  # produced by ast.List inside EvalGclAst.
+  #
+  # When the plain list contains a nested YamletList (a YAML-sequence
+  # variable referenced in the expression), evaluate_fully leaves that
+  # inner YamletList unresolved because the `elif isinstance(v, list)`
+  # branch was removed and the `elif isinstance(v, YamletList)` branch
+  # only fires for top-level YamletList values, not for plain lists
+  # that happen to contain them.
+  # This test is expected to FAIL until ast.List is fixed.
+  # ------------------------------------------------------------------
+  def test_evaluate_fully_recurses_into_expr_list(self):
+    # Double-quoted scalar; [inner, 42] is ast.List inside EvalGclAst.
+    YAMLET = '''# Yamlet
+x: hello
+inner:
+  - !expr x + '_a'
+result: !expr "[inner, 42]"
+'''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    full = t.evaluate_fully()
+    # inner should have been recursively evaluated to a plain list.
+    self.assertNotIsInstance(full['result'][0], yamlet.YamletList)
+    self.assertEqual(full['result'][0], ['hello_a'])
+    self.assertEqual(full['result'][1], 42)
+
+
 if __name__ == '__main__':
   unittest.main()
