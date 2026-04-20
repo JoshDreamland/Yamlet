@@ -2670,5 +2670,191 @@ result: !expr "[inner, 42]"
     self.assertEqual(full['result'][1], 42)
 
 
+# ===========================================================================
+# TestCompositableCloneSemantics
+#
+# Verifies the clone behavior that governs how many !iam roles (or any
+# Compositable) get generated depending on how they appear in config.
+# These tests use plain GclDict tuples as a proxy for !iam before that
+# primitive exists in Speare.
+#
+# Four cases documented in spearecfg README "IAM Object Model" section:
+#   A  — template instantiation: each !composite produces a distinct clone
+#   A' — shared variable reference: !expr returns same object, no clone
+#   B  — !composite [up.field]: does compositing a field with its parent clone?
+#   C  — parameterized template: each child fills !external args independently
+#
+# Also covers vars.version_string defaulting to !external.
+# ===========================================================================
+
+class TestCompositableCloneSemantics(unittest.TestCase):
+
+  def Opts(self):
+    return yamlet.YamletOptions()
+
+  # ------------------------------------------------------------------
+  # Case A: template instantiation creates distinct Compositable clones.
+  # A !composite of the same template twice should yield two distinct
+  # GclDict objects for any Compositable field defined inside the template.
+  # ------------------------------------------------------------------
+  def test_template_clone_creates_distinct_objects(self):
+    YAMLET = '''# Yamlet
+_template: !template
+  role:
+    name: generated
+
+svc_a: !composite [_template]
+svc_b: !composite [_template]
+'''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    role_a = t['svc_a']['role']
+    role_b = t['svc_b']['role']
+    self.assertEqual(role_a['name'], 'generated')
+    self.assertEqual(role_b['name'], 'generated')
+    self.assertIsNot(role_a, role_b,
+        'Each template instantiation should produce a distinct clone')
+
+  # ------------------------------------------------------------------
+  # Case A': shared variable reference does NOT clone.
+  # !expr returning the same outer-scope object should yield the same
+  # Python identity in both services — intentional sharing.
+  # ------------------------------------------------------------------
+  def test_shared_var_reference_is_same_object(self):
+    YAMLET = '''# Yamlet
+_shared_role:
+  name: shared
+
+svc_a:
+  role: !expr _shared_role
+
+svc_b:
+  role: !expr _shared_role
+'''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    role_a = t['svc_a']['role']
+    role_b = t['svc_b']['role']
+    self.assertIs(role_a, role_b,
+        'Shared variable reference should return the same object, not a clone')
+
+  # ------------------------------------------------------------------
+  # Case B: forking a parent's Compositable via super.
+  #
+  # 'up' in Yamlet is the *enclosing* GclDict (parent scope).
+  # 'super' is the *base tuple being composed* — what you want here.
+  #
+  # When svc_a composites _template and then overrides `role` with
+  # !composite [super.role, {extra: thing}], super.role is the role
+  # value inherited from _template before this second composite.
+  # The result should be a fresh clone with the extra field merged in.
+  # ------------------------------------------------------------------
+  def test_composite_super_field_forks_inherited_value(self):
+    YAMLET = '''# Yamlet
+_template: !template
+  role:
+    name: generated
+
+svc_a: !composite
+  - _template
+  - role: !composite
+    - super.role
+    - extra: forked
+'''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['svc_a']['role']['name'], 'generated')
+    self.assertEqual(t['svc_a']['role']['extra'], 'forked')
+    # The template's role should be unmodified
+    self.assertNotIn('extra', t['_template']['role'])
+
+  # ------------------------------------------------------------------
+  # Clarify what 'up' actually does in a !composite list context.
+  # 'up' returns the parent scope (the GclDict that *contains* svc_a),
+  # not the base tuple being composed. If the parent scope has a field
+  # 'shared_role', !composite [up.shared_role] clones it.
+  # ------------------------------------------------------------------
+  def test_up_accesses_parent_scope_not_base_tuple(self):
+    YAMLET = '''# Yamlet
+shared_role:
+  name: shared
+
+svc_a:
+  role: !composite
+    - up.shared_role
+    - extra: forked
+'''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(t['svc_a']['role']['name'], 'shared')
+    self.assertEqual(t['svc_a']['role']['extra'], 'forked')
+    # The parent scope's shared_role should be unmodified
+    self.assertNotIn('extra', t['shared_role'])
+
+  # ------------------------------------------------------------------
+  # Case C: template with !external args — each instantiation produces
+  # a correctly parameterized, distinct Compositable clone.
+  # ------------------------------------------------------------------
+  def test_parameterized_template_produces_distinct_clones(self):
+    YAMLET = '''# Yamlet
+_template: !template
+  args:
+    permission: !external
+  role:
+    policy: !expr args.permission
+
+svc_a: !composite
+  - _template
+  - args:
+      permission: read_only
+
+svc_b: !composite
+  - _template
+  - args:
+      permission: read_write
+'''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    role_a = t['svc_a']['role']
+    role_b = t['svc_b']['role']
+    self.assertEqual(role_a['policy'], 'read_only')
+    self.assertEqual(role_b['policy'], 'read_write')
+    self.assertIsNot(role_a, role_b,
+        'Each parameterized instantiation should produce a distinct clone')
+
+  # ------------------------------------------------------------------
+  # vars.version_string — requires vars to support attribute access.
+  #
+  # Yamlet uses getattr() for `obj.attr` expressions on non-GclDict
+  # objects. A plain Python dict does NOT support attribute access, so
+  # the Speare runtime must wrap extra_vars in a SimpleNamespace (or
+  # GclDict) before passing it as the `vars` global.
+  #
+  # These tests use SimpleNamespace to reflect the required runtime
+  # behavior. A missing key raises AttributeError (surfaced as a Yamlet
+  # exception); a present key resolves correctly.
+  # ------------------------------------------------------------------
+  def test_missing_vars_key_in_expression_raises(self):
+    from types import SimpleNamespace
+    YAMLET = '''# Yamlet
+module_version: !expr vars.version_string
+'''
+    opts = yamlet.YamletOptions(globals={'vars': SimpleNamespace()})
+    loader = yamlet.Loader(opts)
+    t = loader.load(YAMLET)
+    with self.assertRaises(Exception):
+      _ = t['module_version']
+
+  def test_provided_vars_key_resolves(self):
+    from types import SimpleNamespace
+    YAMLET = '''# Yamlet
+module_version: !expr vars.version_string
+'''
+    opts = yamlet.YamletOptions(globals={'vars': SimpleNamespace(version_string='abc123')})
+    loader = yamlet.Loader(opts)
+    t = loader.load(YAMLET)
+    self.assertEqual(t['module_version'], 'abc123')
+
+
 if __name__ == '__main__':
   unittest.main()
