@@ -1767,18 +1767,20 @@ def EvalGclAst(et, ectx):
       val = ev(et.value)
       if et.attr in _BUILTIN_NAMES:
         with ectx.Scope(val): return _BUILTIN_NAMES[et.attr](ectx)
+      traceable_err = None
       if isinstance(val, GclDict):
         try:
           with ectx.Scope(val): return val._gcl_traceable_get_(et.attr, ectx)
-        except KeyError:
-          ectx.Raise(KeyError,
-                     f'There is no variable called `{et.attr}` in this scope.')
+        except KeyError as ke:
+          # Key not in dict — fall through to getattr below, which finds
+          # Python properties / descriptors on GclDict subclasses.
+          traceable_err = ke
       try:
-        if isinstance(val, GclDict): return val[et.attr]
-        else: return getattr(val, et.attr)
+        return getattr(val, et.attr)
       except Exception as e:
         ectx.Raise(KeyError, f'Cannot access attribute on value:\n  value'
-             f'({type(val).__name__}): {val}\n  attribute: {et.attr}\n', e)
+             f'({type(val).__name__}): {val}\n  attribute: {et.attr}\n',
+             traceable_err or e)
 
     case ast.BinOp:
       l, r = ev(et.left), ev(et.right)

@@ -2939,6 +2939,45 @@ svc2: !composite
     self.assertEqual(t['svc2']['obj']['b'], 2)
     self.assertIsNot(t['svc1']['obj'], t['svc2']['obj'])
 
+  def test_property_accessible_in_expr(self):
+    """Python @property descriptors on GclDict subclasses are accessible
+    via !expr when the attribute is not a dict key."""
+    class WithProp(yamlet.GclDict):
+      @property
+      def computed(self):
+        return f'hello-{self["name"]}'
+
+    YAMLET = '''# Yamlet
+obj: !wp
+  name: world
+result: !expr obj.computed
+in_fmt: !fmt 'say {obj.computed}'
+'''
+    loader = yamlet.Loader(yamlet.YamletOptions())
+    loader.add_constructor('!wp', WithProp,
+                           style=yamlet.ConstructStyle.MAPPING)
+    t = loader.load(YAMLET)
+    self.assertEqual(t['result'], 'hello-world')
+    self.assertEqual(t['in_fmt'], 'say hello-world')
+
+  def test_dict_key_shadows_property(self):
+    """A dict key with the same name as a @property takes precedence."""
+    class WithProp(yamlet.GclDict):
+      @property
+      def x(self):
+        return 'from-property'
+
+    YAMLET = '''# Yamlet
+obj: !wp
+  x: from-dict
+result: !expr obj.x
+'''
+    loader = yamlet.Loader(yamlet.YamletOptions())
+    loader.add_constructor('!wp', WithProp,
+                           style=yamlet.ConstructStyle.MAPPING)
+    t = loader.load(YAMLET)
+    self.assertEqual(t['result'], 'from-dict')
+
 
 class TestFalseyCompositeBase(unittest.TestCase):
   """Compositing must use `is not None`, not truthiness, to track whether
