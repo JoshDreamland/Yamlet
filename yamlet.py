@@ -72,6 +72,11 @@ class ConstructStyle:
   # The value will be treated as a Yamlet expression (`!expr`),
   # and your type will be constructed from the result.
   EXPR = 'EXPR'
+  # The node will be processed as a mapping through ProcessYamlPairs,
+  # producing a GclDict (or subclass).  If the constructor is a GclDict
+  # subclass, it will be passed as dict_class to ProcessYamlPairs.
+  # A bare tag with no body produces an empty instance.
+  MAPPING = 'MAPPING'
 
 
 class ImportInfo:
@@ -204,6 +209,24 @@ class Loader(ruamel.yaml.YAML):
               'is your type constructable from `(ruamel.Loader, ruamel.Node)`?',
               node.start_mark) from e
       yc.add_constructor(tag, RawUserConstructor)
+      return self
+    if style == ConstructStyle.MAPPING:
+      yamlet_opts = self.yamlet_options
+      def MappingUserConstructor(loader, node):
+        pairs = loader.construct_pairs(node, deep=True) \
+                if node.id == 'mapping' else []
+        try:
+          return ProcessYamlPairs(
+              pairs, gcl_opts=yamlet_opts,
+              yaml_point=YamlPoint(node.start_mark, node.end_mark),
+              is_template=False, dict_class=ctor)
+        except Exception as e:
+          if isinstance(e, ConstructorError): raise
+          raise ConstructorError(None, None,
+              f'Yamlet mapping constructor `!{tag}` encountered an error; '
+              f'is `{ctor.__name__}` constructable as a GclDict subclass?',
+              node.start_mark) from e
+      yc.add_constructor(tag, MappingUserConstructor)
       return self
     def ConstructDefer(deferred, tp):
       def Constructor(loader, node):
@@ -1391,7 +1414,8 @@ def _OkayToFlatComposite(v1, v2):
   return not one_okay
 
 
-def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point, is_template):
+def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point, is_template,
+                     dict_class=None):
   filtered_pairs = {}
   preprocessors = {}
   gcl_locals = {}
@@ -1453,10 +1477,10 @@ def ProcessYamlPairs(mapping_pairs, gcl_opts, yaml_point, is_template):
         if isinstance(v0, FlatCompositor): v0.add_compositing_value(v)
         else: filtered_pairs[k] = FlatCompositor([v0, v], yaml_point, varname=k)
   terminateIfDirective()
-  res = GclDict(filtered_pairs, gcl_locals=gcl_locals,
-                gcl_parent=None, gcl_super=None, gcl_opts=gcl_opts,
-                preprocessors=preprocessors, gcl_is_template=is_template,
-                yaml_point=yaml_point)
+  res = (dict_class or GclDict)(filtered_pairs, gcl_locals=gcl_locals,
+            gcl_parent=None, gcl_super=None, gcl_opts=gcl_opts,
+            preprocessors=preprocessors, gcl_is_template=is_template,
+            yaml_point=yaml_point)
   _UpdateParents(res._gcl_noresolve_values_(), res)
   _UpdateParents(res._gcl_locals_.values(), res)
   _UpdateParents(preprocessors.values(), res)

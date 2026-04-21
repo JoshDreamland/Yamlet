@@ -2885,6 +2885,60 @@ svc: !composite [_base]
     self.assertIsInstance(t['svc']['inner'], MyDict)
     self.assertEqual(t['svc']['inner']['x'], 1)
 
+  def test_mapping_style_constructs_subclass(self):
+    """ConstructStyle.MAPPING produces a GclDict subclass directly."""
+    init_calls = []
+    class Tracked(yamlet.GclDict):
+      def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        init_calls.append(self)
+
+    YAMLET = '''# Yamlet
+bare: !tracked
+with_body: !tracked
+  x: 1
+  y: 2
+'''
+    loader = yamlet.Loader(yamlet.YamletOptions())
+    loader.add_constructor('!tracked', Tracked,
+                           style=yamlet.ConstructStyle.MAPPING)
+    t = loader.load(YAMLET)
+    self.assertIsInstance(t['bare'], Tracked)
+    self.assertIsInstance(t['with_body'], Tracked)
+    self.assertEqual(len(t['bare']), 0)
+    self.assertEqual(t['with_body']['x'], 1)
+    self.assertEqual(t['with_body']['y'], 2)
+    self.assertEqual(len(init_calls), 2,
+        '__init__ should be called for each constructed instance')
+
+  def test_mapping_style_subclass_survives_template_clone(self):
+    """A MAPPING-constructed subclass must survive template cloning and
+    composition, including merges with plain dicts."""
+    class Custom(yamlet.GclDict): pass
+
+    YAMLET = '''# Yamlet
+_tmpl: !template
+  obj: !custom
+    a: 1
+
+svc1: !composite [_tmpl]
+svc2: !composite
+  - _tmpl
+  - obj: !composite
+    - super.obj
+    - b: 2
+'''
+    loader = yamlet.Loader(yamlet.YamletOptions())
+    loader.add_constructor('!custom', Custom,
+                           style=yamlet.ConstructStyle.MAPPING)
+    t = loader.load(YAMLET)
+    self.assertIsInstance(t['svc1']['obj'], Custom)
+    self.assertEqual(t['svc1']['obj']['a'], 1)
+    self.assertIsInstance(t['svc2']['obj'], Custom)
+    self.assertEqual(t['svc2']['obj']['a'], 1)
+    self.assertEqual(t['svc2']['obj']['b'], 2)
+    self.assertIsNot(t['svc1']['obj'], t['svc2']['obj'])
+
 
 class TestFalseyCompositeBase(unittest.TestCase):
   """Compositing must use `is not None`, not truthiness, to track whether
