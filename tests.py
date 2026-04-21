@@ -2933,5 +2933,37 @@ svc: !composite
     self.assertEqual(inner['extra'], 'added')
 
 
+class TestMergeableList(unittest.TestCase):
+  """MergeableList extends on merge instead of raising TypeError."""
+
+  def _make_ml(self, items):
+    opts = yamlet.YamletOptions()
+    point = yamlet.YamlPoint(None, None)
+    ml = yamlet.MergeableList(items, opts, point)
+    return ml, opts, point
+
+  def test_merge_extends(self):
+    """Merging two MergeableLists appends the second's items."""
+    ml, opts, point = self._make_ml(['a', 'b'])
+    other = yamlet.MergeableList(['c'], opts, point)
+    ectx = yamlet._EvalContext(None, opts, point, name='test')
+    ml.yamlet_merge(other, ectx)
+    self.assertEqual(list(ml), ['a', 'b', 'c'])
+
+  def test_clone_preserves_type(self):
+    ml, opts, point = self._make_ml(['x'])
+    ectx = yamlet._EvalContext(None, opts, point, name='test')
+    cloned = ml.yamlet_clone(None, ectx)
+    self.assertIsInstance(cloned, yamlet.MergeableList)
+    self.assertEqual(list(cloned), ['x'])
+    self.assertIsNot(ml, cloned)
+
+  def test_merge_rejects_non_list(self):
+    ml, opts, point = self._make_ml([])
+    ectx = yamlet._EvalContext(None, opts, point, name='test')
+    with self.assertRaises(Exception):
+      ml.yamlet_merge('not a list', ectx)
+
+
 if __name__ == '__main__':
   unittest.main()

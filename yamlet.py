@@ -502,6 +502,42 @@ class YamletList(list, Compositable):
     return f'YamletList({list.__repr__(self)})'
 
 
+class MergeableList(YamletList):
+  '''A YamletList that extends on merge instead of raising.
+
+  When a base tuple and an extending tuple both define the same key as a
+  MergeableList, the extending tuple's items are appended to the base
+  tuple's list rather than raising TypeError.
+
+  Cloning produces another MergeableList (not a plain YamletList).
+
+  Usage from Python (e.g. in a Speare primitive constructor)::
+
+      ml = MergeableList(items, gcl_opts=..., yaml_point=...)
+
+  There is currently no YAML tag that produces a MergeableList directly;
+  primitives construct them programmatically from parsed list values.
+  '''
+
+  def yamlet_clone(self, new_scope, ectx):
+    cloned = []
+    for item in list.__iter__(self):
+      cloned.append(
+          item.yamlet_clone(new_scope, ectx) if isinstance(item, Cloneable) else item)
+    result = MergeableList(cloned, self._gcl_opts_, self._yaml_point_)
+    result._gcl_parent_ = new_scope
+    return result
+
+  def yamlet_merge(self, other, ectx):
+    if not isinstance(other, list):
+      ectx.Raise(TypeError,
+                 f'Cannot composite a list with a {type(other).__name__}.')
+    for item in list.__iter__(other):
+      self.append(
+          item.yamlet_clone(self._gcl_parent_, ectx)
+          if isinstance(item, Cloneable) else item)
+
+
 class GclDict(dict, Compositable):
   def __init__(self, *args, gcl_locals,
                gcl_parent, gcl_super, gcl_opts, yaml_point, preprocessors,
