@@ -656,9 +656,9 @@ class GclDict(dict, Compositable):
   def yamlet_clone(self, new_scope, ectx):
     cloned_preprocessors = {k: v.yamlet_clone(new_scope, ectx)
                             for k, v in self._gcl_preprocessors_.items()}
-    res = GclDict(gcl_parent=new_scope, gcl_super=self, gcl_locals={},
-                  gcl_opts=self._gcl_opts_, preprocessors=cloned_preprocessors,
-                  gcl_is_template=False, yaml_point=ectx.GetPoint())
+    res = type(self)(gcl_parent=new_scope, gcl_super=self, gcl_locals={},
+                     gcl_opts=self._gcl_opts_, preprocessors=cloned_preprocessors,
+                     gcl_is_template=False, yaml_point=ectx.GetPoint())
     for k, v in self._gcl_noresolve_items_():
       if isinstance(v, Cloneable): v = v.yamlet_clone(res, ectx)
       res.__setitem__(k, v)
@@ -1868,6 +1868,6 @@ def _CompositeGclTuples(tuples, ectx):
   res = None
   for t in tuples:
     if t is None: ectx.Raise(ValueError, 'Expression evaluation failed?')
-    if res: res.yamlet_merge(t, ectx)
+    if res is not None: res.yamlet_merge(t, ectx)
     else:   res = t.yamlet_clone(ectx.scope, ectx)
   return res

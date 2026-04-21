@@ -2856,5 +2856,82 @@ module_version: !expr vars.version_string
     self.assertEqual(t['module_version'], 'abc123')
 
 
+class TestGclDictSubclassClone(unittest.TestCase):
+  """GclDict.yamlet_clone must preserve the actual subclass type."""
+
+  def test_subclass_survives_clone(self):
+    class MyDict(yamlet.GclDict): pass
+
+    YAMLET = '''# Yamlet
+_base: !template
+  inner: !mydict
+    x: 1
+
+svc: !composite [_base]
+'''
+    loader = yamlet.Loader(yamlet.YamletOptions())
+    def construct_mydict(ruamel_loader, node):
+      pairs = ruamel_loader.construct_pairs(node, deep=True) \
+              if node.id == 'mapping' else []
+      result = yamlet.ProcessYamlPairs(
+          pairs, gcl_opts=loader.yamlet_options,
+          yaml_point=yamlet.YamlPoint(node.start_mark, node.end_mark),
+          is_template=False)
+      result.__class__ = MyDict
+      return result
+    loader.add_constructor('!mydict', construct_mydict,
+                           style=yamlet.ConstructStyle.RAW)
+    t = loader.load(YAMLET)
+    self.assertIsInstance(t['svc']['inner'], MyDict)
+    self.assertEqual(t['svc']['inner']['x'], 1)
+
+
+class TestFalseyCompositeBase(unittest.TestCase):
+  """Compositing must use `is not None`, not truthiness, to track whether
+  the first tuple has been cloned.
+
+  _CompositeGclTuples previously used `if res:` to decide whether to merge
+  or clone.  Any falsey first-tuple result was treated as uninitialized,
+  causing the second tuple to be cloned as a fresh base instead of merged
+  into the first.  This lost the first tuple's state entirely.
+  """
+
+  def test_falsey_first_tuple_is_merge_target(self):
+    """A Compositable that is always falsey must still be the merge target
+    when it appears first in a composite list."""
+
+    class AlwaysFalsey(yamlet.GclDict):
+      def __bool__(self): return False
+
+    YAMLET = '''# Yamlet
+_base: !template
+  inner: !falsey
+    tag: from_base
+
+svc: !composite
+  - _base
+  - inner: !composite
+    - super.inner
+    - extra: added
+'''
+    loader = yamlet.Loader(yamlet.YamletOptions())
+    def construct_falsey(ruamel_loader, node):
+      pairs = ruamel_loader.construct_pairs(node, deep=True) \
+              if node.id == 'mapping' else []
+      result = yamlet.ProcessYamlPairs(
+          pairs, gcl_opts=loader.yamlet_options,
+          yaml_point=yamlet.YamlPoint(node.start_mark, node.end_mark),
+          is_template=False)
+      result.__class__ = AlwaysFalsey
+      return result
+    loader.add_constructor('!falsey', construct_falsey,
+                           style=yamlet.ConstructStyle.RAW)
+    t = loader.load(YAMLET)
+    inner = t['svc']['inner']
+    self.assertEqual(inner['tag'], 'from_base',
+        'First tuple was discarded instead of used as merge target')
+    self.assertEqual(inner['extra'], 'added')
+
+
 if __name__ == '__main__':
   unittest.main()
