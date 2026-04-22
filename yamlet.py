@@ -1169,7 +1169,8 @@ class GclLambda:
     if sep < 0: raise ArgumentError(_EvalContext.FormatError(yaml_point,
         f'Lambda does not delimit arguments from expression: `{expr}`'))
     self.params = [x.strip() for x in expr[:sep].split(',')]
-    self.expression = expr[sep+1:]
+    if not self.params[-1]: self.params.pop()
+    self.expression = expr[sep+1:].strip()
 
   def Callable(self, name, ectx):
     params = self.params

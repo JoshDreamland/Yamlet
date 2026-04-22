@@ -1633,6 +1633,186 @@ class CrossModuleMechanics(unittest.TestCase):
     y = loader.load(YAMLET)
     self.assertEqual(y['value'], 'Last-ditch value')
 
+  def test_import_template_then_composite(self):
+    """Import a module with a template, compose with it from the importer."""
+    lib = '''# Yamlet
+    layout: !template
+      args:
+        base: !external
+      tier_a: !fmt '{args.base}.0.0/18'
+      tier_b: !fmt '{args.base}.64.0/18'
+    '''
+    YAMLET = '''# Yamlet
+    lib: !import 'lib'
+    result: !composite
+      - lib.layout
+      - args:
+          base: "10.24"
+    '''
+    loader = yamlet.Loader(self.Opts(
+        import_resolver=TempFileRetriever({'lib': TempModule(lib)})))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['result']['tier_a'], '10.24.0.0/18')
+    self.assertEqual(y['result']['tier_b'], '10.24.64.0/18')
+
+  def test_import_template_compose_via_expr(self):
+    """Import a template and compose with it using !expr inline syntax."""
+    lib = '''# Yamlet
+    layout: !template
+      args:
+        base: !external
+      tier_a: !fmt '{args.base}.0.0/18'
+      tier_b: !fmt '{args.base}.64.0/18'
+    '''
+    YAMLET = '''# Yamlet
+    lib: !import 'lib'
+    result: !expr |
+      lib.layout { args: { base: '10.24' } }
+    '''
+    loader = yamlet.Loader(self.Opts(
+        import_resolver=TempFileRetriever({'lib': TempModule(lib)})))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['result']['tier_a'], '10.24.0.0/18')
+    self.assertEqual(y['result']['tier_b'], '10.24.64.0/18')
+
+  def test_lambda_wrapping_imported_template(self):
+    """Lambda that composes with an imported template — the subnet_layout pattern."""
+    lib = '''# Yamlet
+    layout: !template
+      args:
+        base: !external
+      tier_a: !fmt '{args.base}.0.0/18'
+      tier_b: !fmt '{args.base}.64.0/18'
+    '''
+    YAMLET = '''# Yamlet
+    lib: !import 'lib'
+    make_layout: !lambda |
+        _base: lib.layout { args: { base: _base } }
+    result: !expr make_layout('10.24')
+    '''
+    loader = yamlet.Loader(self.Opts(
+        import_resolver=TempFileRetriever({'lib': TempModule(lib)})))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['result']['tier_a'], '10.24.0.0/18')
+    self.assertEqual(y['result']['tier_b'], '10.24.64.0/18')
+
+  def test_lambda_scope_captures_import(self):
+    """Lambda defined in module scope correctly resolves imported names."""
+    lib = '''# Yamlet
+    default_region: us-east-1
+    '''
+    YAMLET = '''# Yamlet
+    lib: !import 'lib'
+    get_region: !lambda |
+        : lib.default_region
+    result: !expr get_region()
+    '''
+    loader = yamlet.Loader(self.Opts(
+        import_resolver=TempFileRetriever({'lib': TempModule(lib)})))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['result'], 'us-east-1')
+
+  def test_lambda_with_quoted_key_in_composition(self):
+    """Lambda composing a template where the key name might parse as a variable."""
+    lib = '''# Yamlet
+    tup: !template
+      args:
+        vpc_base: !external
+      cidr: !fmt '{args.vpc_base}.0.0/16'
+    '''
+    YAMLET = '''# Yamlet
+    lib: !import 'lib'
+    make_cidr: !lambda |
+        _base: lib.tup { args: { 'vpc_base': _base } }
+    result: !expr make_cidr('10.24')
+    '''
+    loader = yamlet.Loader(self.Opts(
+        import_resolver=TempFileRetriever({'lib': TempModule(lib)})))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['result']['cidr'], '10.24.0.0/16')
+
+  def test_lambda_in_imported_module_cannot_see_siblings(self):
+    """Lambda defined in an imported module can't resolve sibling keys.
+
+    This is a known limitation: GclLambda.Callable receives the caller's
+    ectx, not the definition-site ectx.  The lambda's Branch scope doesn't
+    include the imported module's namespace.  Workaround: use !composite
+    instead of a lambda wrapper for imported templates.
+    """
+    lib = '''# Yamlet
+    helper: 42
+    get_helper: !lambda |
+        : helper
+    '''
+    YAMLET = '''# Yamlet
+    lib: !import 'lib'
+    result: !expr lib.get_helper()
+    '''
+    loader = yamlet.Loader(self.Opts(
+        import_resolver=TempFileRetriever({'lib': TempModule(lib)})))
+    y = loader.load(YAMLET)
+    with AssertRaisesCleanException(self, NameError):
+      y['result']
+
+  def test_lambda_with_unquoted_key_in_composition(self):
+    """Same as above but without quoting the key — tests the key-vs-variable ambiguity."""
+    lib = '''# Yamlet
+    tup: !template
+      args:
+        vpc_base: !external
+      cidr: !fmt '{args.vpc_base}.0.0/16'
+    '''
+    YAMLET = '''# Yamlet
+    lib: !import 'lib'
+    make_cidr: !lambda |
+        _base: lib.tup { args: { vpc_base: _base } }
+    result: !expr make_cidr('10.24')
+    '''
+    loader = yamlet.Loader(self.Opts(
+        import_resolver=TempFileRetriever({'lib': TempModule(lib)})))
+    y = loader.load(YAMLET)
+    self.assertEqual(y['result']['cidr'], '10.24.0.0/16')
+
+
+@ParameterizedOnOpts
+class SpeareEdgeCases(unittest.TestCase):
+  """Tests motivated by building Speare atop Yamlet — lambda edge cases,
+  import+composition patterns, and expression evaluator boundary conditions."""
+
+  def test_lambda_zero_arg(self):
+    """Zero-arg lambda (`: body`) should work — no parameters, just a callable."""
+    YAMLET = '''# Yamlet
+    greeting: !lambda |
+              : 'hello'
+    result: !expr greeting()
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['result'], 'hello')
+
+  def test_lambda_trailing_comma(self):
+    """Trailing comma in lambda params (x,: body) should work like (x: body)."""
+    YAMLET = '''# Yamlet
+    identity: !lambda |
+              x,: x
+    result: !expr identity(42)
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['result'], 42)
+
+  def test_lambda_empty_param_in_middle_is_error(self):
+    """Double comma (x,,y: body) should fail — empty param name is not valid."""
+    YAMLET = '''# Yamlet
+    bad: !lambda |
+         x,,y: x + y
+    result: !expr bad(1, 2)
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    with AssertRaisesCleanException(self, TypeError):
+      y['result']
+
 
 @ParameterizedOnOpts
 class GptsTestIdeas(unittest.TestCase):
