@@ -390,6 +390,20 @@ def _BuiltinNones():
 external, null, _undefined, _empty = _BuiltinNones()
 
 
+class ScopeBound:
+  '''Mixin for any Yamlet value that participates in scope wiring.
+
+  Types that live inside a GclDict and need their parent scope set at
+  construction time (via _UpdateParents) must inherit from ScopeBound.
+  This replaces the ad-hoc isinstance tuple that previously grew with
+  every new scope-aware type.
+  '''
+  def _gcl_update_parent_(self, parent):
+    raise NotImplementedError(
+        'A class which extends `yamlet.ScopeBound` should implement '
+        f'`_gcl_update_parent_()`; `{type(self).__name__}` does not.')
+
+
 class Cloneable:
   '''Clonable objects can be duplicated (via deep-copy) at any time.
 
@@ -432,7 +446,7 @@ def _ShouldFlatCompositeOnMerge(v):
   ░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒'''
 
 
-class YamletList(list, Compositable):
+class YamletList(list, Compositable, ScopeBound):
   '''A YAML sequence that lazily resolves DeferredValue items through its scope.
 
   Analogous to GclDict for mappings: all YAML sequences are constructed as
@@ -449,19 +463,8 @@ class YamletList(list, Compositable):
   TypeError.  When a derived tuple introduces a list for a key that has no
   existing value in the base, the list is simply cloned via yamlet_clone.
 
-  Interface gap (tracked)
-  -----------------------
-  GclDict and YamletList are both scope-bound container types, but there is
-  no shared protocol that codifies this.  As a result, evaluate_fully and
-  _UpdateParents contain explicit isinstance checks for both types.  Any
-  future Yamlet or Speare container type (e.g. a typed list, a state
-  reference) will need to be added to each check site manually.
-
-  The correct fix is a lightweight EvaluableContainer protocol with two
-  obligations: (1) _gcl_update_parent_(parent) -- called at construction to
-  wire the scope, and (2) a recursive evaluation hook invoked by
-  evaluate_fully.  Until that protocol exists, treat the explicit checks as
-  load-bearing and do not remove them without a replacement.
+  Scope wiring is handled by the ScopeBound mixin; _UpdateParents checks
+  for that type rather than maintaining an ad-hoc isinstance tuple.
   '''
 
   def __init__(self, items, gcl_opts, yaml_point):
@@ -561,7 +564,7 @@ class MergeableList(YamletList):
           if isinstance(item, Cloneable) else item)
 
 
-class GclDict(dict, Compositable):
+class GclDict(dict, Compositable, ScopeBound):
   def __init__(self, *args, gcl_locals,
                gcl_parent, gcl_super, gcl_opts, yaml_point, preprocessors,
                gcl_is_template):
@@ -733,8 +736,6 @@ class GclDict(dict, Compositable):
                                   name='Fully evaluating Yamlet tuple'))
     def ev(v):
       while isinstance(v, DeferredValue): v = v._gcl_resolve_(ectx)
-      # See "Interface gap" note in YamletList docstring: these two checks
-      # must be kept in sync with any new scope-bound container types.
       if isinstance(v, GclDict): v = v.evaluate_fully(ectx)
       elif isinstance(v, YamletList): v = [ev(i) for i in v]
       return v
@@ -951,7 +952,7 @@ class _EvalContext:
   ░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒'''
 
 
-class DeferredValue(Cloneable):
+class DeferredValue(Cloneable, ScopeBound):
   def __init__(self, data, yaml_point):
     self._gcl_construct_ = data
     self._gcl_cache_ = _empty
@@ -1156,7 +1157,7 @@ class FlatCompositor(DeferredValue):
             varname=self._gcl_varname_)
 
 
-class GclLambda:
+class GclLambda(ScopeBound):
   '''GclLambda isn't actually a DeferredValue, but they appear similar in YAML.
 
   The glass actually provides an interface to make itself callable, and the
@@ -1165,6 +1166,7 @@ class GclLambda:
   '''
   def __init__(self, expr, yaml_point):
     self.yaml_point = yaml_point
+    self._gcl_parent_ = None
     sep = expr.find(':')
     if sep < 0: raise ArgumentError(_EvalContext.FormatError(yaml_point,
         f'Lambda does not delimit arguments from expression: `{expr}`'))
@@ -1172,8 +1174,11 @@ class GclLambda:
     if not self.params[-1]: self.params.pop()
     self.expression = expr[sep+1:].strip()
 
+  def _gcl_update_parent_(self, parent): self._gcl_parent_ = parent
+
   def Callable(self, name, ectx):
     params = self.params
+    def_scope = self._gcl_parent_
     def LambdaEvaluator(*args, **kwargs):
       mapped_args = list(args)
       if len(mapped_args) > len(params):
@@ -1190,7 +1195,8 @@ class GclLambda:
           f'Extra keyword arguments `{kwargs.keys()}` to lambda `{name}`')
       return _GclExprEval(self.expression, ectx.Branch(
           f'lambda `{name}`', self.yaml_point, ectx.NewGclDict(
-              {params[i]: mapped_args[i] for i in range(len(params))}
+              {params[i]: mapped_args[i] for i in range(len(params))},
+              gcl_parent=def_scope
           )
       ))
     return LambdaEvaluator
@@ -1231,10 +1237,8 @@ class PreprocessingTuple(DeferredValue, Compositable):
 
 
 def _UpdateParents(items, parent):
-  # See "Interface gap" note in YamletList docstring: any new scope-bound
-  # container type must be added to this tuple.
   for i in items:
-    if isinstance(i, (GclDict, DeferredValue, PreprocessingDirective, YamletList)):
+    if isinstance(i, ScopeBound):
       i._gcl_update_parent_(parent)
 
 
@@ -1300,7 +1304,7 @@ def _WrapStream(s):
   ░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒'''
 
 
-class PreprocessingDirective():
+class PreprocessingDirective(ScopeBound):
   def __init__(self, data, yaml_point):
     self._gcl_construct_ = data
     self._yaml_point_ = yaml_point

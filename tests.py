@@ -1731,14 +1731,8 @@ class CrossModuleMechanics(unittest.TestCase):
     y = loader.load(YAMLET)
     self.assertEqual(y['result']['cidr'], '10.24.0.0/16')
 
-  def test_lambda_in_imported_module_cannot_see_siblings(self):
-    """Lambda defined in an imported module can't resolve sibling keys.
-
-    This is a known limitation: GclLambda.Callable receives the caller's
-    ectx, not the definition-site ectx.  The lambda's Branch scope doesn't
-    include the imported module's namespace.  Workaround: use !composite
-    instead of a lambda wrapper for imported templates.
-    """
+  def test_lambda_in_imported_module_sees_siblings(self):
+    """Lambda defined in an imported module resolves sibling keys."""
     lib = '''# Yamlet
     helper: 42
     get_helper: !lambda |
@@ -1751,8 +1745,7 @@ class CrossModuleMechanics(unittest.TestCase):
     loader = yamlet.Loader(self.Opts(
         import_resolver=TempFileRetriever({'lib': TempModule(lib)})))
     y = loader.load(YAMLET)
-    with AssertRaisesCleanException(self, NameError):
-      y['result']
+    self.assertEqual(y['result'], 42)
 
   def test_lambda_with_unquoted_key_in_composition(self):
     """Same as above but without quoting the key — tests the key-vs-variable ambiguity."""
@@ -2741,6 +2734,7 @@ class TestYamletList(unittest.TestCase):
     self.assertEqual(m[0][1], 'v_01')
 
 
+@ParameterizedOnOpts
 class TestYamletListEdgeCases(unittest.TestCase):
   '''Targeted edge-case tests written to probe gaps in the YamletList model.
 
@@ -2866,7 +2860,7 @@ result: !expr "[inner, 42]"
 #
 # Also covers vars.version_string defaulting to !external.
 # ===========================================================================
-
+@ParameterizedOnOpts
 class TestCompositableCloneSemantics(unittest.TestCase):
 
   def Opts(self):
@@ -3036,6 +3030,7 @@ module_version: !expr vars.version_string
     self.assertEqual(t['module_version'], 'abc123')
 
 
+@ParameterizedOnOpts
 class TestGclDictSubclassClone(unittest.TestCase):
   """GclDict.yamlet_clone must preserve the actual subclass type."""
 
@@ -3159,6 +3154,7 @@ result: !expr obj.x
     self.assertEqual(t['result'], 'from-dict')
 
 
+@ParameterizedOnOpts
 class TestFalseyCompositeBase(unittest.TestCase):
   """Compositing must use `is not None`, not truthiness, to track whether
   the first tuple has been cloned.
@@ -3206,6 +3202,7 @@ svc: !composite
     self.assertEqual(inner['extra'], 'added')
 
 
+@ParameterizedOnOpts
 class TestMergeableList(unittest.TestCase):
   """MergeableList extends on merge instead of raising TypeError."""
 
