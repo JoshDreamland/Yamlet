@@ -1645,6 +1645,18 @@ _BUILTIN_VARS = {
 }
 
 
+def _LastStepIsUpSuper(et):
+  '''True if the last evaluated step in `et` is `up` or `super`.
+
+  Used to gate GCL scope-walk on the *next* attribute access: in
+  `foo.up.x` the last step before `.x` was `.up`, so `.x` walks
+  scopes from foo's parent rather than doing a strict dict lookup.
+  See README "Scoping Quirks" for the user-facing rule.'''
+  if isinstance(et, ast.Name): return et.id in ('up', 'super')
+  if isinstance(et, ast.Attribute): return et.attr in ('up', 'super')
+  return False
+
+
 '''▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒░
 ░▒▓██▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀██▓▒░
 ░▒▓██  Name lookup magic sauce: our variable lookup and scope resolution.  ██▓▒░
@@ -1770,6 +1782,14 @@ def EvalGclAst(et, ectx):
       val = ev(et.value)
       if et.attr in _BUILTIN_NAMES:
         with ectx.Scope(val): return _BUILTIN_NAMES[et.attr](ectx)
+      # GCL `up.X` / `super.X` semantics: scope-walk the wrapped tuple
+      # rather than strict dict lookup.  Walks tuple-parent links only
+      # (never the ectx chain), so `x: !expr up.x` correctly raises
+      # instead of self-referencing.  See README "Scoping Quirks".
+      if _LastStepIsUpSuper(et.value) and isinstance(val, GclDict):
+        with ectx.Scope(val):
+          res = _GclNameLookup(et.attr, ectx, top=False)
+          if res is not _undefined: return res
       traceable_err = None
       if isinstance(val, GclDict):
         try:

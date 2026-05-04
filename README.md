@@ -678,7 +678,33 @@ All of these values are accessible from the innermost inheriting scope,
 `Apple Banana Blueberry Cherry`, representing the values from the `super` tuple
 pair first, followed by the values from the inheriting tuple pair.
 
-It’s worth noting that `super.up.fruit` is equivalent to `up.super.fruit`.
+In this case, `super.up.fruit` is equivalent to `up.super.fruit`.
+
+#### `up.X` and `super.X` are searches, not strict lookups
+
+Bare-name lookup in Yamlet (and GCL) walks the scope chain: `x` looks in
+the current tuple, then its parent, then its grandparent, and so on.
+`up.X` and `super.X` follow the same rule, but start the walk one scope
+outward — at the up-scope or super-scope — rather than at the current
+tuple. They are NOT strict dict accesses on a single tuple.
+
+```yaml
+a: 1
+outer:
+  inner:
+    a: 3
+    b: !expr a       # 3 — bare lookup hits inner
+    c: !expr up.a    # 1 — up-walk starts at outer (no `a`), continues to root
+    d: !expr up.up.a # 1 — explicit two-step walk lands at root
+```
+
+The walk uses tuple-parent links only; it does not bleed back into the
+expression's evaluation context, so `x: !expr up.x` correctly raises
+rather than self-referencing.
+
+This rule applies to any chain whose final step is `up`/`super`, not
+just chains of pure up/super. In `inner.up.x`, the `.x` step searches
+from inner's parent outward.
 
 ### Referencing vs Instantiating
 

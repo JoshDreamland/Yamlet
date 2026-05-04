@@ -403,6 +403,97 @@ class TestInheritance(unittest.TestCase):
         val = y['t']['a']
         self.fail(f'Did not throw an exception; got `{val}`')
 
+  def test_up_walks_scope_chain(self):
+    # GCL semantics: `up.x` and `super.x` start a scope-chain search at
+    # the parent (or super) scope.  If the immediate up-scope doesn't
+    # define the name, the search continues outward — it is NOT a
+    # strict dict access on a single tuple.
+    #
+    # Reference (gcl interpreter):
+    #   a = 1
+    #   outer { inner { a = 3; b = a; c = up.a; d = up.up.a } }
+    # produces b=3, c=1, d=1 — `c` finds `a=1` by walking past `outer`
+    # (which has no `a`) up to the root.
+    YAMLET = '''# Yamlet
+    a: 1
+    outer:
+      inner:
+        a: 3
+        b: !expr a
+        c: !expr up.a
+        d: !expr up.up.a
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    inner = y['outer']['inner']
+    self.assertEqual(inner['b'], 3)
+    self.assertEqual(inner['c'], 1)
+    self.assertEqual(inner['d'], 1)
+
+  def test_up_does_not_self_reference(self):
+    # `up.X` starts its scope-chain search ONE scope up — the current
+    # scope must not be considered, otherwise `x: !expr up.x` would loop
+    # on itself (or worse: silently bind a field to a sibling field via
+    # ectx-chain fallback, masking real lookup bugs).
+    YAMLET = '''# Yamlet
+    t:
+      x: !expr up.x
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    with AssertRaisesCleanException(self, KeyError):
+        val = y['t']['x']
+        self.fail(f'Expected up.x to raise; got `{val}`')
+
+  def test_up_does_not_find_sibling(self):
+    # `up.X` must not fall back to a sibling field of the original scope
+    # via the evaluation-context chain — only the strict tuple-parent
+    # chain from the up scope is searched.
+    YAMLET = '''# Yamlet
+    t:
+      a: !expr up.x
+      x: a sibling that up.x must NOT find
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    with AssertRaisesCleanException(self, KeyError):
+        val = y['t']['a']
+        self.fail(f'Expected up.x to raise; got `{val}`')
+
+  def test_up_prefers_nearer_scope(self):
+    # When an intermediate scope DOES define the name, up.x should bind
+    # to the nearest match — not skip to root.
+    YAMLET = '''# Yamlet
+    a: 1
+    outer:
+      a: 2
+      inner:
+        a: 3
+        c: !expr up.a
+        d: !expr up.up.a
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    inner = y['outer']['inner']
+    self.assertEqual(inner['c'], 2)  # nearest enclosing a is outer's
+    self.assertEqual(inner['d'], 1)  # two scopes up reaches root
+
+  def test_up_after_named_prefix_still_walks(self):
+    # The scope-walk gate triggers whenever the last attribute step is
+    # `up`/`super` — it must NOT require the whole chain to be
+    # up/super-only.  Here `inner.up.x`'s last step is `.up`, so the
+    # following `.x` should scope-walk inner's parent (container), and
+    # since container has no `x`, the search continues to the root.
+    YAMLET = '''# Yamlet
+    x: at_root
+    container:
+      inner:
+        val: !expr inner.up.x
+    '''
+    loader = yamlet.Loader(self.Opts())
+    y = loader.load(YAMLET)
+    self.assertEqual(y['container']['inner']['val'], 'at_root')
+
 
 @ParameterizedOnOpts
 class TestValueMechanics(unittest.TestCase):
