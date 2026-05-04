@@ -101,7 +101,7 @@ t1: !import yaml-gcl2.yaml
 t2:
   beans: beans
   coolbeans: !expr |
-      'Hello, {subject}! ' + 'I say {cool} {beans}!'
+      f'Hello, {subject}! ' + f'I say {cool} {beans}!'
 
 childtuple: !expr t1.tuple t2
 childtuple2: !expr t2 t1.tuple2
@@ -186,7 +186,7 @@ Yamlet offers several syntaxes for string composition.
 
 ```yaml
 subject: world
-str1: !expr ('Hello, {subject}!')
+str1: !expr (f'Hello, {subject}!')
 str2: !expr ('Hello, ' + subject + '!')
 str3: !fmt 'Hello, {subject}!'
 ```
@@ -348,7 +348,7 @@ Yamlet expressions inherit list comprehension syntax from Python.
 
 ```yaml
 my_array: [1, 2, 'red', 'blue']
-fishes: !expr r', '.join('{x} fish' for x in my_array)
+fishes: !expr r', '.join(f'{x} fish' for x in my_array)
 ```
 
 In this example, the `fishes` array evaluates to
@@ -494,9 +494,9 @@ As an example:
 library_template: !template
   !local STATIC_LIB_PREFIX: !expr ('s' if platform == 'windows' else '')
   static_libs: !expr |
-      ['{LIB_PREFIX}{STATIC_LIB_PREFIX}{name}.{STATIC_LIB_EXT}' for name in lib_names]
+      [f'{LIB_PREFIX}{STATIC_LIB_PREFIX}{name}.{STATIC_LIB_EXT}' for name in lib_names]
   dynamic_libs: !expr |
-      ['{LIB_PREFIX}{name}.{SHARED_LIB_EXT}' for name in lib_names]
+      [f'{LIB_PREFIX}{name}.{SHARED_LIB_EXT}' for name in lib_names]
   !local lib_names: !external
 ```
 
@@ -640,8 +640,8 @@ tuple_C: !expr |
   tuple_A {
     tuple_B: {
       fruit: 'Blueberry',
-      value2: '{super.up.fruit} {super.fruit} {fruit} {up.fruit}',
-      value3: '{super.value}  -vs-  {value}',
+      value2: f'{super.up.fruit} {super.fruit} {fruit} {up.fruit}',
+      value3: f'{super.value}  -vs-  {value}',
     },
     fruit: 'Cherry'
   }
@@ -723,7 +723,7 @@ From the included example, `print(t['childtuple'].explain_value('coolbeans'))`
 will produce the following dump:
 
 ```
-`coolbeans` was computed from evaluating expression `'Hello, {subject}! ' + 'I say {cool} {beans}!'` in "yaml-gcl.yaml", line 4, column 14
+`coolbeans` was computed from evaluating expression `f'Hello, {subject}! ' + f'I say {cool} {beans}!'` in "yaml-gcl.yaml", line 4, column 14
      - With lookup of `subject` in this scope in "/home/josh/Projects/Yamlet/yaml-gcl2.yaml", line 2, column 3
      - With lookup of `cool` in this scope in "/home/josh/Projects/Yamlet/yaml-gcl2.yaml", line 2, column 3
      - With lookup of `beans` in this scope in "/home/josh/Projects/Yamlet/yaml-gcl2.yaml", line 2, column 3

@@ -1750,8 +1750,6 @@ def EvalGclAst(et, ectx):
       while isinstance(res, DeferredValue): res = res._gcl_resolve_(ectx)
       return res
     case ast.Constant:
-      if isinstance(et.value, str):
-        return _ResolveStringValue(et.value, ectx)
       return et.value
 
     case ast.JoinedStr:

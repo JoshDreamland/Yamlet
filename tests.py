@@ -406,6 +406,15 @@ class TestInheritance(unittest.TestCase):
 
 @ParameterizedOnOpts
 class TestValueMechanics(unittest.TestCase):
+  def test_expr_string_constant_is_not_substituted(self):
+    YAMLET = '''# Yamlet
+    x: hello
+    verbatim: !expr "['{x} {y}', x]"
+    '''
+    loader = yamlet.Loader(self.Opts())
+    t = loader.load(YAMLET)
+    self.assertEqual(list(t['verbatim']), ['{x} {y}', 'hello'])
+
   def test_escaped_braces(self):
     YAMLET = '''# Yamlet
     v: Hello
@@ -419,7 +428,7 @@ class TestValueMechanics(unittest.TestCase):
   def test_array_comprehension(self):
     YAMLET = '''# Yamlet
     my_array: [1, 2, 'red', 'blue']
-    fishes: !expr "['{x} fish' for x in my_array]"
+    fishes: !expr "[f'{x} fish' for x in my_array]"
     '''
     loader = yamlet.Loader(self.Opts())
     t = loader.load(YAMLET)
@@ -439,9 +448,9 @@ class TestValueMechanics(unittest.TestCase):
     YAMLET = '''# Yamlet
     array1: [1, 2, 3, 4]
     array2: ['red', 'green', 'blue', 'yellow']
-    fishes: !expr "['{x} {y} fish' for x in array1 for y in array2]"
+    fishes: !expr "[f'{x} {y} fish' for x in array1 for y in array2]"
     filtered: !expr |
-        ['{x} {y} fish' for x in array1 for y in array2 if x != len(y)]
+        [f'{x} {y} fish' for x in array1 for y in array2 if x != len(y)]
     '''
     loader = yamlet.Loader(self.Opts())
     t = loader.load(YAMLET)
@@ -686,7 +695,7 @@ class TestConditionals(unittest.TestCase):
         }, {
           color: 'green'
         }) {
-          val: 'Color: {color}'
+          val: f'Color: {color}'
         }
     t2: !composite
       - t1
@@ -1959,7 +1968,7 @@ class RunExample(unittest.TestCase):
     YAMLET = '''# Yamlet
     my_yamlet_map: !expr |
       {
-        key: 'my string value with {inlined} {expressions}',
+        key: f'my string value with {inlined} {expressions}',
         otherkey: 'my other value'
       }
     '''
@@ -1973,7 +1982,7 @@ class RunExample(unittest.TestCase):
   def test_string_formatting_examples_from_the_readme(self):
     YAMLET = '''# Yamlet
     subject: world
-    str1: !expr ('Hello, {subject}!')
+    str1: !expr (f'Hello, {subject}!')
     str2: !expr ('Hello, ' + subject + '!')
     str3: !fmt 'Hello, {subject}!'
     '''
@@ -2024,8 +2033,8 @@ class RunExample(unittest.TestCase):
       tuple_A {
         tuple_B: {
           fruit: 'Blueberry',
-          value2: '{super.up.fruit} {super.fruit} {fruit} {up.fruit}',
-          value3: '{super.value}  -vs-  {value}',
+          value2: f'{super.up.fruit} {super.fruit} {fruit} {up.fruit}',
+          value3: f'{super.value}  -vs-  {value}',
         },
         fruit: 'Cherry'
       }
@@ -2135,7 +2144,7 @@ class RunExample(unittest.TestCase):
   def test_one_fish_two_fish_from_readme(self):
     YAMLET = '''# Yamlet
     my_array: [1, 2, 'red', 'blue']
-    fishes: !expr r', '.join('{x} fish' for x in my_array)
+    fishes: !expr r', '.join(f'{x} fish' for x in my_array)
     '''
     loader = yamlet.Loader(self.Opts())
     t = loader.load(YAMLET)
@@ -2181,9 +2190,9 @@ class FieldTests(unittest.TestCase):
     icu_lib_template: !template
       !local STATIC_LIB_PREFIX: !expr ('s' if 'linux' == 'windows' else '')
       static_libs: !expr |
-          ['{LIB_PREFIX}{STATIC_LIB_PREFIX}{name}.{STATIC_LIB_EXT}' for name in lib_names]
+          [f'{LIB_PREFIX}{STATIC_LIB_PREFIX}{name}.{STATIC_LIB_EXT}' for name in lib_names]
       dynamic_libs: !expr |
-          ['{LIB_PREFIX}{name}.{SHARED_LIB_EXT}' for name in lib_names]
+          [f'{LIB_PREFIX}{name}.{SHARED_LIB_EXT}' for name in lib_names]
       !local lib_names: !external
 
     module_libs:

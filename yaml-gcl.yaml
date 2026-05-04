@@ -2,7 +2,7 @@ t1: !import yaml-gcl2.yaml
 t2:
   beans: beans
   coolbeans: !expr |
-      'Hello, {subject}! ' + 'I say {cool} {beans}!'
+      f'Hello, {subject}! ' + f'I say {cool} {beans}!'
 
 childtuple: !expr t1.tuple t2
 childtuple2: !expr t2 t1.tuple2
